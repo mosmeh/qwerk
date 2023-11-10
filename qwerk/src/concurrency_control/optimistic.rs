@@ -95,8 +95,8 @@ impl Record {
     }
 
     fn unlock(&self) {
-        let prev = self.tid.fetch_and(!LOCKED, SeqCst);
-        debug_assert!(prev & LOCKED > 0);
+        let prev_tid = self.tid.fetch_and(!LOCKED, SeqCst);
+        debug_assert!(prev_tid & LOCKED > 0);
     }
 
     fn read(&self) -> RecordSnapshot {
@@ -151,15 +151,15 @@ impl TransactionExecutor for Executor<'_> {
         self.write_set.clear();
     }
 
-    fn read(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>> {
         let item = self.write_set.iter().find(|item| item.key.as_ref() == key);
         if let Some(item) = item {
-            return Ok(item.value.clone().map(|value| value.to_vec()));
+            return Ok(item.value.as_deref());
         }
 
         let item = self.read_set.iter().find(|item| item.key.as_ref() == key);
         if let Some(item) = item {
-            return Ok(item.value.map(|value| value.to_vec()));
+            return Ok(item.value);
         }
 
         let record_ptr = self.index.peek_with(key, |_, value| value.0);
@@ -189,7 +189,7 @@ impl TransactionExecutor for Executor<'_> {
 
         let value = item.value;
         self.read_set.push(item);
-        Ok(value.map(|value| value.to_vec()))
+        Ok(value)
     }
 
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()> {

@@ -38,9 +38,9 @@ pub struct Record {
 unsafe impl Sync for Record {}
 
 impl Record {
-    unsafe fn get(&self) -> &Option<Box<[u8]>> {
+    unsafe fn get(&self) -> Option<&[u8]> {
         debug_assert!(self.lock.is_locked());
-        &*self.value.get()
+        (*self.value.get()).as_deref()
     }
 
     unsafe fn set(&self, value: Option<Box<[u8]>>) {
@@ -66,15 +66,13 @@ impl TransactionExecutor for Executor<'_> {
         self.working_set.clear();
     }
 
-    fn read(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>> {
         let item = self
             .working_set
             .iter()
             .find(|item| item.key.as_ref() == key);
         if let Some(item) = item {
-            return Ok(unsafe { item.record_ptr.as_ref().get() }
-                .clone()
-                .map(|value| value.into_vec()));
+            return Ok(unsafe { item.record_ptr.as_ref().get() });
         }
 
         let (item, value) = match self.index.entry(key.to_vec().into()) {
@@ -89,9 +87,7 @@ impl TransactionExecutor for Executor<'_> {
                     record_ptr,
                     kind: ItemKind::Read,
                 };
-                let value = unsafe { record.get() }
-                    .clone()
-                    .map(|value| value.into_vec());
+                let value = unsafe { record.get() };
                 (item, value)
             }
             Entry::Vacant(entry) => {
@@ -118,8 +114,8 @@ impl TransactionExecutor for Executor<'_> {
             .iter_mut()
             .find(|item| item.key.as_ref() == key);
         if let Some(item) = item {
+            let record = unsafe { item.record_ptr.as_ref() };
             if matches!(item.kind, ItemKind::Read) {
-                let record = unsafe { item.record_ptr.as_ref() };
                 if !record.lock.try_upgrade() {
                     return Err(Error::NotSerializable);
                 }
@@ -129,7 +125,7 @@ impl TransactionExecutor for Executor<'_> {
                 return Ok(());
             }
             let value = value.map(|value| value.to_vec().into());
-            unsafe { item.record_ptr.as_ref().set(value) };
+            unsafe { record.set(value) };
             return Ok(());
         }
 

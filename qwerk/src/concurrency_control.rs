@@ -22,14 +22,14 @@ pub trait ConcurrencyControl: Default {
 
 pub trait TransactionExecutor {
     fn begin_transaction(&mut self);
-    fn read(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+    fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>>;
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()>;
     fn commit(&mut self) -> Result<()>;
     fn abort(&mut self);
 }
 
 #[derive(Copy)]
-pub struct RecordPtr<T>(pub NonNull<T>);
+pub struct RecordPtr<T>(pub(crate) NonNull<T>);
 
 impl<T> Clone for RecordPtr<T> {
     fn clone(&self) -> Self {

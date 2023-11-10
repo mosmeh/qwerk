@@ -28,7 +28,7 @@ impl<T: Default> SlottedCell<T> {
         }
 
         Self {
-            // Safety: AtomicPtr has the same representation as a pointer and arrays have the same
+            // SAFETY: AtomicPtr has the same representation as a pointer and arrays have the same
             // representation as a sequence of their inner type.
             buckets: unsafe { std::mem::transmute(buckets) },
         }

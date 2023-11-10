@@ -24,32 +24,46 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(short, long, default_value_t = 8)]
+    #[arg(long, default_value_t = 8)]
     threads: usize,
 
-    #[arg(short, long, default_value_t = 100000)]
+    #[arg(long, default_value_t = 100000)]
     records: u64,
 
-    #[arg(short, long, default_value_t = 8)]
+    #[arg(long, default_value_t = 8)]
     payload: usize,
 
-    #[arg(short, long, default_value_t = 2000)]
+    #[arg(long, default_value_t = 2000)]
     duration: u64,
 
-    #[arg(short, long, default_value_t = 4)]
+    #[arg(long, default_value_t = 4)]
     working_set: usize,
 
-    #[arg(short, long, default_value_t = 0.5)]
+    #[arg(long, default_value_t = 0.5)]
     contention: f64,
 
     #[arg(long, value_enum, default_value_t = Protocol::Pessimistic)]
     protocol: Protocol,
+
+    #[arg(long, value_enum, default_value_t = WorkloadKind::A)]
+    workload: WorkloadKind,
+
+    #[arg(long, required_if_eq("workload", "variable"))]
+    read_proportion: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Protocol {
     Optimistic,
     Pessimistic,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum WorkloadKind {
+    A,
+    B,
+    C,
+    Variable,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -68,13 +82,38 @@ where
     C: ConcurrencyControl + Default + Send + Sync + 'static,
     C::Record: Send + Sync,
 {
-    let workload = Workload {
-        read_proportion: 50,
-        update_proportion: 50,
-        insert_proportion: 0,
-        rmw_proportion: 0,
-        request_distribution: RequestDistribution::Zipfian,
-        record_count: cli.records,
+    let workload = match cli.workload {
+        WorkloadKind::A => Workload {
+            read_proportion: 50,
+            update_proportion: 50,
+            insert_proportion: 0,
+            rmw_proportion: 0,
+            request_distribution: RequestDistribution::Zipfian,
+        },
+        WorkloadKind::B => Workload {
+            read_proportion: 95,
+            update_proportion: 5,
+            insert_proportion: 0,
+            rmw_proportion: 0,
+            request_distribution: RequestDistribution::Zipfian,
+        },
+        WorkloadKind::C => Workload {
+            read_proportion: 100,
+            update_proportion: 0,
+            insert_proportion: 0,
+            rmw_proportion: 0,
+            request_distribution: RequestDistribution::Zipfian,
+        },
+        WorkloadKind::Variable => {
+            let read_proportion = ((100.0 * cli.read_proportion.unwrap()) as u32).min(100);
+            Workload {
+                read_proportion,
+                update_proportion: 100 - read_proportion,
+                insert_proportion: 0,
+                rmw_proportion: 0,
+                request_distribution: RequestDistribution::Zipfian,
+            }
+        }
     };
 
     let db: Database<C> = Database::new();
@@ -99,8 +138,8 @@ where
     let threads: Vec<_> = (0..num_threads)
         .map(|thread_index| {
             let shared = shared.clone();
-            let from = workload.record_count * thread_index as u64 / num_threads as u64;
-            let to = workload.record_count * (thread_index as u64 + 1) / num_threads as u64;
+            let from = cli.records * thread_index as u64 / num_threads as u64;
+            let to = cli.records * (thread_index as u64 + 1) / num_threads as u64;
             let payload = vec![0; cli.payload];
             std::thread::spawn(move || {
                 let mut worker = shared.db.spawn_worker();
@@ -139,12 +178,8 @@ where
                 assert!(core_affinity::set_for_current(core_id));
                 let mut worker = shared.db.spawn_worker();
                 let mut rng = rand::rngs::SmallRng::from_entropy();
-                let mut generator = NumberGenerator::new(
-                    &mut rng,
-                    &shared.latest,
-                    workload.record_count,
-                    cli.contention,
-                );
+                let mut generator =
+                    NumberGenerator::new(&mut rng, &shared.latest, cli.records, cli.contention);
                 let mut stats = Statistics::default();
                 let mut keys = Vec::with_capacity(cli.working_set);
                 let payload = vec![0; cli.payload];
@@ -238,25 +273,23 @@ where
         tps: u64,
         workload: String,
         protocol: String,
-        threads: u64,
-        clients: usize,
-        handler: bool,
+        threads: usize,
         theta: f64,
+        read_proportion: Option<f64>,
     }
     let mut stdout = std::io::stdout().lock();
-    serde_json::ser::to_writer(
+    serde_json::ser::to_writer_pretty(
         &mut stdout,
         &Summary {
             etime: elapsed.as_millis() as u64,
             commits: stats.num_commits,
             aborts: stats.num_aborts,
             tps,
-            workload: "a".to_owned(),
+            workload: format!("{:?}", cli.workload),
             protocol: format!("{:?}", cli.protocol),
-            threads: 1,
-            clients: cli.threads,
-            handler: true,
+            threads: cli.threads,
             theta: cli.contention,
+            read_proportion: cli.read_proportion,
         },
     )
     .unwrap();
@@ -363,7 +396,6 @@ struct Workload {
     insert_proportion: u32,
     rmw_proportion: u32,
     request_distribution: RequestDistribution,
-    record_count: u64,
 }
 
 #[derive(Clone, Copy)]

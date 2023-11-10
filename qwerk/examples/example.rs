@@ -20,15 +20,15 @@ fn run<C: ConcurrencyControl>() -> Result<()> {
     txn.commit()?;
 
     let mut txn = worker.begin_transaction();
-    assert_eq!(txn.get(b"alice")?, Some(b"1".to_vec()));
-    assert_eq!(txn.get(b"bob")?, Some(b"2".to_vec()));
+    assert_eq!(txn.get(b"alice")?, Some(b"1".as_slice()));
+    assert_eq!(txn.get(b"bob")?, Some(b"2".as_slice()));
     txn.insert(b"alice", b"2")?;
     txn.remove(b"bob")?;
     txn.abort();
 
     let mut txn = worker.begin_transaction();
-    assert_eq!(txn.get(b"alice")?, Some(b"1".to_vec()));
-    assert_eq!(txn.get(b"bob")?, Some(b"2".to_vec()));
+    assert_eq!(txn.get(b"alice")?, Some(b"1".as_slice()));
+    assert_eq!(txn.get(b"bob")?, Some(b"2".as_slice()));
     txn.commit()?;
 
     Ok(())

@@ -81,8 +81,30 @@ pub struct Transaction<'db, 'worker, C: ConcurrencyControl> {
 }
 
 impl<C: ConcurrencyControl> Transaction<'_, '_, C> {
-    pub fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>> {
-        self.do_operation(|executor| executor.read(key.as_ref()))
+    pub fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<&[u8]>> {
+        if !self.is_running {
+            return Err(Error::AlreadyAborted);
+        }
+
+        let result = self.worker.txn_executor.read(key.as_ref());
+
+        // HACK: workaround for limitation of NLL borrow checker.
+        // Returning a reference obtained from self.worker in the Ok branch
+        // requires self.worker to be mutably borrowed for the rest of
+        // the function, making it impossible to call self.do_abort() in
+        // the Err branch.
+        // To avoid this, we turn the reference into a pointer and turn it
+        // back into a reference, so that the reference is no longer tied
+        // to self.worker.
+        match result {
+            Ok(value) => Ok(value
+                .map(|value| unsafe { std::slice::from_raw_parts(value.as_ptr(), value.len()) })),
+            // Ok(value) => Ok(value), // This compiles with -Zpolonius
+            Err(err) => {
+                self.do_abort();
+                Err(err)
+            }
+        }
     }
 
     pub fn insert<K, V>(&mut self, key: K, value: V) -> Result<()>
@@ -90,11 +112,11 @@ impl<C: ConcurrencyControl> Transaction<'_, '_, C> {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        self.do_operation(|executor| executor.write(key.as_ref(), Some(value.as_ref())))
+        self.try_mutate(|executor| executor.write(key.as_ref(), Some(value.as_ref())))
     }
 
     pub fn remove<K: AsRef<[u8]>>(&mut self, key: K) -> Result<()> {
-        self.do_operation(|executor| executor.write(key.as_ref(), None))
+        self.try_mutate(|executor| executor.write(key.as_ref(), None))
     }
 
     /// Commits the transaction.
@@ -106,7 +128,7 @@ impl<C: ConcurrencyControl> Transaction<'_, '_, C> {
     ///
     /// [`get`]: #method.get
     pub fn commit(mut self) -> Result<()> {
-        self.do_operation(|executor| executor.commit())?;
+        self.try_mutate(|executor| executor.commit())?;
         self.is_running = false;
         Ok(())
     }
@@ -118,20 +140,18 @@ impl<C: ConcurrencyControl> Transaction<'_, '_, C> {
         self.do_abort();
     }
 
-    fn do_operation<T, F>(&mut self, f: F) -> Result<T>
+    fn try_mutate<T, F>(&mut self, f: F) -> Result<T>
     where
         F: FnOnce(&mut C::Executor<'_>) -> Result<T>,
     {
         if !self.is_running {
             return Err(Error::AlreadyAborted);
         }
-        match f(&mut self.worker.txn_executor) {
-            Ok(value) => Ok(value),
-            Err(err) => {
-                self.do_abort();
-                Err(err)
-            }
+        let result = f(&mut self.worker.txn_executor);
+        if result.is_err() {
+            self.do_abort();
         }
+        result
     }
 
     fn do_abort(&mut self) {
