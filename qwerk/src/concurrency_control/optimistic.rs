@@ -1,15 +1,12 @@
-use super::{ConcurrencyControl, RecordPtr, TransactionExecutor};
+use super::{ConcurrencyControlInternal, Shared, TransactionExecutor};
 use crate::{
     epoch::{EpochFramework, EpochGuard},
     qsbr::{Qsbr, QsbrGuard},
-    Error, Result,
+    ConcurrencyControl, Error, Result,
 };
 use crossbeam_utils::Backoff;
 use scc::{hash_index::Entry, HashIndex};
-use std::{
-    ptr::NonNull,
-    sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::SeqCst},
-};
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::SeqCst};
 
 const EPOCH_POS: u64 = 32;
 const SEQUENCE_POS: u64 = 1;
@@ -21,19 +18,27 @@ const LOCKED: u64 = 0x1;
 // bit [0]     - locked
 
 /// Silo
-#[derive(Default)]
 pub struct Optimistic {
     epoch_fw: EpochFramework,
     qsbr: Qsbr,
 }
 
-impl ConcurrencyControl for Optimistic {
+impl ConcurrencyControl for Optimistic {}
+
+impl ConcurrencyControlInternal for Optimistic {
     type Record = Record;
     type Executor<'a> = Executor<'a>;
 
+    fn init() -> Self {
+        Self {
+            epoch_fw: Default::default(),
+            qsbr: Default::default(),
+        }
+    }
+
     fn spawn_executor<'a>(
         &'a self,
-        index: &'a HashIndex<Box<[u8]>, RecordPtr<Self::Record>>,
+        index: &'a HashIndex<Box<[u8]>, Shared<Self::Record>>,
     ) -> Self::Executor<'a> {
         Self::Executor {
             index,
@@ -132,13 +137,13 @@ struct RecordSnapshot {
 
 pub struct Executor<'a> {
     // global state
-    index: &'a HashIndex<Box<[u8]>, RecordPtr<Record>>,
+    index: &'a HashIndex<Box<[u8]>, Shared<Record>>,
 
     // executor's state
     epoch_guard: EpochGuard<'a>,
     qsbr: QsbrGuard<'a>,
     garbage_values: Vec<Box<[u8]>>,
-    garbage_records: Vec<NonNull<Record>>,
+    garbage_records: Vec<Shared<Record>>,
 
     // transaction's state
     read_set: Vec<ReadItem<'a>>,
@@ -162,7 +167,7 @@ impl TransactionExecutor for Executor<'_> {
             return Ok(item.value);
         }
 
-        let record_ptr = self.index.peek_with(key, |_, value| value.0);
+        let record_ptr = self.index.peek_with(key, |_, value| *value);
         let key = key.to_vec().into();
         let item = match record_ptr {
             Some(record_ptr) => {
@@ -230,15 +235,15 @@ impl TransactionExecutor for Executor<'_> {
             let record_ptr = match self.index.entry(item.key.clone()) {
                 Entry::Occupied(entry) => {
                     should_lock = true;
-                    entry.get().0
+                    *entry.get()
                 }
                 Entry::Vacant(entry) => {
-                    let record_ptr = NonNull::from(Box::leak(Box::new(Record {
+                    let record_ptr = Shared::new(Record {
                         buf_ptr: AtomicPtr::new(std::ptr::null_mut()),
                         len: 0.into(),
                         tid: LOCKED.into(),
-                    })));
-                    entry.insert_entry(record_ptr.into());
+                    });
+                    entry.insert_entry(record_ptr);
                     record_ptr
                 }
             };
@@ -253,7 +258,7 @@ impl TransactionExecutor for Executor<'_> {
         for item in &self.read_set {
             let tid = item
                 .record_ptr
-                .or_else(|| self.index.peek_with(&item.key, |_, value| value.0))
+                .or_else(|| self.index.peek_with(&item.key, |_, value| *value))
                 .map(|record_ptr| unsafe { record_ptr.as_ref() }.tid.load(SeqCst))
                 .unwrap_or(0);
             if tid != item.tid {
@@ -342,7 +347,7 @@ impl Executor<'_> {
         self.qsbr.sync();
         self.garbage_values.clear();
         for record_ptr in self.garbage_records.drain(..) {
-            let _ = unsafe { Box::from_raw(record_ptr.as_ptr()) };
+            let _ = unsafe { Shared::into_box(record_ptr) };
         }
     }
 }
@@ -358,12 +363,12 @@ impl Drop for Executor<'_> {
 struct ReadItem<'a> {
     key: Box<[u8]>,
     value: Option<&'a [u8]>,
-    record_ptr: Option<NonNull<Record>>,
+    record_ptr: Option<Shared<Record>>,
     tid: u64,
 }
 
 struct WriteItem {
     key: Box<[u8]>,
     value: Option<Box<[u8]>>,
-    record_ptr: Option<NonNull<Record>>,
+    record_ptr: Option<Shared<Record>>,
 }

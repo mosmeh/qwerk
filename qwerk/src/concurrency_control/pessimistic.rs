@@ -1,25 +1,32 @@
-use super::{ConcurrencyControl, RecordPtr, TransactionExecutor};
+use super::{ConcurrencyControlInternal, TransactionExecutor};
 use crate::{
     lock::NoWaitRwLock,
     qsbr::{Qsbr, QsbrGuard},
-    Error, Result,
+    ConcurrencyControl, Error, Result, Shared,
 };
 use scc::{hash_index::Entry, HashIndex};
-use std::{cell::UnsafeCell, ptr::NonNull};
+use std::cell::UnsafeCell;
 
 /// Strong strict two phase locking with NO_WAIT deadlock prevention
-#[derive(Default)]
 pub struct Pessimistic {
     qsbr: Qsbr,
 }
 
-impl ConcurrencyControl for Pessimistic {
+impl ConcurrencyControl for Pessimistic {}
+
+impl ConcurrencyControlInternal for Pessimistic {
     type Record = Record;
     type Executor<'a> = Executor<'a>;
 
+    fn init() -> Self {
+        Self {
+            qsbr: Default::default(),
+        }
+    }
+
     fn spawn_executor<'a>(
         &'a self,
-        index: &'a HashIndex<Box<[u8]>, RecordPtr<Self::Record>>,
+        index: &'a HashIndex<Box<[u8]>, Shared<Self::Record>>,
     ) -> Self::Executor<'a> {
         Self::Executor {
             index,
@@ -55,9 +62,9 @@ impl Record {
 }
 
 pub struct Executor<'a> {
-    index: &'a HashIndex<Box<[u8]>, RecordPtr<Record>>,
+    index: &'a HashIndex<Box<[u8]>, Shared<Record>>,
     qsbr: QsbrGuard<'a>,
-    garbage_records: Vec<NonNull<Record>>,
+    garbage_records: Vec<Shared<Record>>,
     working_set: Vec<WorkingItem>,
 }
 
@@ -77,7 +84,7 @@ impl TransactionExecutor for Executor<'_> {
 
         let (item, value) = match self.index.entry(key.to_vec().into()) {
             Entry::Occupied(entry) => {
-                let record_ptr = entry.get().0;
+                let record_ptr = *entry.get();
                 let record = unsafe { &mut *record_ptr.as_ptr() };
                 if !record.lock.try_lock_shared() {
                     return Err(Error::NotSerializable);
@@ -91,11 +98,11 @@ impl TransactionExecutor for Executor<'_> {
                 (item, value)
             }
             Entry::Vacant(entry) => {
-                let record_ptr = NonNull::from(Box::leak(Box::new(Record {
+                let record_ptr = Shared::new(Record {
                     value: None.into(),
                     lock: NoWaitRwLock::new_locked_shared(),
-                })));
-                entry.insert_entry(record_ptr.into());
+                });
+                entry.insert_entry(record_ptr);
                 let item = WorkingItem {
                     key: key.to_vec().into(),
                     record_ptr,
@@ -131,7 +138,7 @@ impl TransactionExecutor for Executor<'_> {
 
         let item = match self.index.entry(key.to_vec().into()) {
             Entry::Occupied(entry) => {
-                let record_ptr = entry.get().0;
+                let record_ptr = *entry.get();
                 let record = unsafe { record_ptr.as_ref() };
                 if !record.lock.try_lock_exclusive() {
                     return Err(Error::NotSerializable);
@@ -146,11 +153,11 @@ impl TransactionExecutor for Executor<'_> {
             }
             Entry::Vacant(entry) => {
                 let value = value.map(|value| value.to_vec().into());
-                let record_ptr = NonNull::from(Box::leak(Box::new(Record {
+                let record_ptr = Shared::new(Record {
                     value: value.into(),
                     lock: NoWaitRwLock::new_locked_exclusive(),
-                })));
-                entry.insert_entry(record_ptr.into());
+                });
+                entry.insert_entry(record_ptr);
                 WorkingItem {
                     key: key.to_vec().into(),
                     record_ptr,
@@ -218,7 +225,7 @@ impl Executor<'_> {
     fn collect_garbage(&mut self) {
         self.qsbr.sync();
         for record_ptr in self.garbage_records.drain(..) {
-            let _ = unsafe { Box::from_raw(record_ptr.as_ptr()) };
+            let _ = unsafe { Shared::into_box(record_ptr) };
         }
     }
 }
@@ -233,7 +240,7 @@ impl Drop for Executor<'_> {
 
 struct WorkingItem {
     key: Box<[u8]>,
-    record_ptr: NonNull<Record>,
+    record_ptr: Shared<Record>,
     kind: ItemKind,
 }
 

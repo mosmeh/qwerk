@@ -1,8 +1,5 @@
 use clap::{arg, Parser, ValueEnum};
-use qwerk::{
-    concurrency_control::{ConcurrencyControl, Optimistic, Pessimistic},
-    Database,
-};
+use qwerk::{ConcurrencyControl, Database, Optimistic, Pessimistic};
 use rand::{
     distributions::{Uniform, WeightedIndex},
     prelude::Distribution,
@@ -77,11 +74,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_benchmark<C>(cli: Cli)
-where
-    C: ConcurrencyControl + Default + Send + Sync + 'static,
-    C::Record: Send + Sync,
-{
+fn run_benchmark<C: ConcurrencyControl>(cli: Cli) {
     let workload = match cli.workload {
         WorkloadKind::A => Workload {
             read_proportion: 50,
@@ -117,13 +110,13 @@ where
     };
 
     let db: Database<C> = Database::new();
-    struct Shared<C: ConcurrencyControl> {
+    struct State<C: ConcurrencyControl> {
         db: Database<C>,
         barrier: Barrier,
         is_running: AtomicBool,
         latest: AtomicU64,
     }
-    let shared = Arc::new(Shared {
+    let state = Arc::new(State {
         db,
         barrier: Barrier::new(cli.threads + 1),
         is_running: true.into(),
@@ -137,12 +130,12 @@ where
     eprintln!("Populating keys");
     let threads: Vec<_> = (0..num_threads)
         .map(|thread_index| {
-            let shared = shared.clone();
+            let state = state.clone();
             let from = cli.records * thread_index as u64 / num_threads as u64;
             let to = cli.records * (thread_index as u64 + 1) / num_threads as u64;
             let payload = vec![0; cli.payload];
             std::thread::spawn(move || {
-                let mut worker = shared.db.spawn_worker();
+                let mut worker = state.db.spawn_worker();
                 let mut txn = worker.begin_transaction();
                 for i in from..to {
                     let key = format!("{}", i).into_bytes();
@@ -172,14 +165,14 @@ where
         .map(|#[allow(unused)] i| {
             #[cfg(feature = "affinity")]
             let core_id = core_ids[i];
-            let shared = shared.clone();
+            let state = state.clone();
             std::thread::spawn(move || {
                 #[cfg(feature = "affinity")]
                 assert!(core_affinity::set_for_current(core_id));
-                let mut worker = shared.db.spawn_worker();
+                let mut worker = state.db.spawn_worker();
                 let mut rng = rand::rngs::SmallRng::from_entropy();
                 let mut generator =
-                    NumberGenerator::new(&mut rng, &shared.latest, cli.records, cli.contention);
+                    NumberGenerator::new(&mut rng, &state.latest, cli.records, cli.contention);
                 let mut stats = Statistics::default();
                 let mut keys = Vec::with_capacity(cli.working_set);
                 let payload = vec![0; cli.payload];
@@ -192,17 +185,17 @@ where
                 let op_dist = WeightedIndex::new(op_weights).unwrap();
                 let has_insert = workload.insert_proportion > 0;
 
-                shared.barrier.wait();
-                while shared.is_running.load(Ordering::SeqCst) {
+                state.barrier.wait();
+                while state.is_running.load(Ordering::SeqCst) {
                     let op = OPERATIONS[op_dist.sample(&mut rng)];
                     for _ in 0..cli.working_set {
                         let key = if op == Operation::Insert {
-                            shared.latest.fetch_add(1, Ordering::SeqCst)
+                            state.latest.fetch_add(1, Ordering::SeqCst)
                         } else {
                             match workload.request_distribution {
                                 RequestDistribution::Uniform => generator.uniform(&mut rng),
                                 RequestDistribution::Zipfian => {
-                                    generator.next(&mut rng, has_insert, &shared.latest)
+                                    generator.next(&mut rng, has_insert, &state.latest)
                                 }
                             }
                         };
@@ -225,7 +218,7 @@ where
                         }
                     }
                     let result = txn.commit();
-                    if shared.is_running.load(Ordering::Relaxed) {
+                    if state.is_running.load(Ordering::Relaxed) {
                         match result {
                             Ok(()) => stats.num_commits += 1,
                             Err(_) => stats.num_aborts += 1,
@@ -240,11 +233,11 @@ where
         .collect();
 
     eprintln!("Start");
-    shared.barrier.wait();
+    state.barrier.wait();
 
     let start = Instant::now();
     std::thread::sleep(Duration::from_millis(cli.duration));
-    shared.is_running.store(false, Ordering::SeqCst);
+    state.is_running.store(false, Ordering::SeqCst);
     let elapsed = start.elapsed();
 
     let mut stats = Statistics::default();

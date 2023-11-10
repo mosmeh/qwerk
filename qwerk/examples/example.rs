@@ -1,7 +1,4 @@
-use qwerk::{
-    concurrency_control::{ConcurrencyControl, Optimistic, Pessimistic},
-    Database, Result,
-};
+use qwerk::{ConcurrencyControl, Database, Optimistic, Pessimistic, Result};
 
 fn main() -> Result<()> {
     run::<Pessimistic>()?;

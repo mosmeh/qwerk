@@ -1,12 +1,15 @@
-pub mod concurrency_control;
-
+mod concurrency_control;
 mod epoch;
 mod lock;
 mod qsbr;
+mod shared;
 mod slotted_cell;
 
-use concurrency_control::{ConcurrencyControl, RecordPtr, TransactionExecutor};
+pub use concurrency_control::{ConcurrencyControl, Optimistic, Pessimistic};
+
+use concurrency_control::TransactionExecutor;
 use scc::HashIndex;
+use shared::Shared;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -20,7 +23,7 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct Database<C: ConcurrencyControl> {
-    index: HashIndex<Box<[u8]>, RecordPtr<C::Record>>,
+    index: HashIndex<Box<[u8]>, Shared<C::Record>>,
     concurrency_control: C,
 }
 
@@ -28,7 +31,7 @@ impl<C: ConcurrencyControl> Default for Database<C> {
     fn default() -> Self {
         Self {
             index: Default::default(),
-            concurrency_control: Default::default(),
+            concurrency_control: C::init(),
         }
     }
 }
@@ -53,7 +56,7 @@ impl<C: ConcurrencyControl> Drop for Database<C> {
         for (_, record_ptr) in self.index.iter(&guard) {
             // SAFETY: Since we have &mut self, all Executors have already been
             //         dropped, so no one is holding record pointers now.
-            let _ = unsafe { Box::from_raw(record_ptr.0.as_ptr()) };
+            let _ = unsafe { Shared::into_box(*record_ptr) };
         }
     }
 }
