@@ -1,0 +1,9 @@
+[package]
+name = "qwerk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+crossbeam-utils = "0.8.16"
+scc = "2.0.3"
+thiserror = "1.0.50"
