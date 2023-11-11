@@ -12,20 +12,35 @@ fn run<C: ConcurrencyControl>() -> Result<()> {
 
     let mut txn = worker.begin_transaction();
     assert!(txn.get(b"alice")?.is_none());
-    txn.insert(b"alice", b"1")?;
-    txn.insert(b"bob", b"2")?;
+    txn.insert(b"alice", b"foo")?;
+    assert_eq!(txn.get(b"alice")?, Some(b"foo".as_slice()));
+    txn.insert(b"bob", b"bar")?;
+    txn.insert(b"carol", b"baz")?;
+    txn.remove(b"carol")?;
+    assert!(txn.get(b"carol")?.is_none());
     txn.commit()?;
 
     let mut txn = worker.begin_transaction();
-    assert_eq!(txn.get(b"alice")?, Some(b"1".as_slice()));
-    assert_eq!(txn.get(b"bob")?, Some(b"2".as_slice()));
-    txn.insert(b"alice", b"2")?;
+    assert_eq!(txn.get(b"alice")?, Some(b"foo".as_slice()));
+    assert_eq!(txn.get(b"bob")?, Some(b"bar".as_slice()));
+    assert!(txn.get(b"carol")?.is_none());
+    txn.commit()?;
+
+    let mut txn = worker.begin_transaction();
+    txn.insert(b"alice", b"qux")?;
     txn.remove(b"bob")?;
     txn.abort();
 
     let mut txn = worker.begin_transaction();
-    assert_eq!(txn.get(b"alice")?, Some(b"1".as_slice()));
-    assert_eq!(txn.get(b"bob")?, Some(b"2".as_slice()));
+    assert_eq!(txn.get(b"alice")?, Some(b"foo".as_slice()));
+    assert_eq!(txn.get(b"bob")?, Some(b"bar".as_slice()));
+    txn.insert(b"alice", b"quux")?;
+    txn.remove(b"bob")?;
+    txn.commit()?;
+
+    let mut txn = worker.begin_transaction();
+    assert_eq!(txn.get(b"alice")?, Some(b"quux".as_slice()));
+    assert!(txn.get(b"bob")?.is_none());
     txn.commit()?;
 
     Ok(())
