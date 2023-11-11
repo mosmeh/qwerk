@@ -15,7 +15,7 @@ const EPOCH_POS: u64 = 32;
 const SEQUENCE_POS: u64 = 1;
 const LOCKED: u64 = 0x1;
 
-// tid
+// TID
 // bits 63:32] - epoch
 // bits[31:1]  - sequence
 // bit [0]     - locked
@@ -45,6 +45,7 @@ impl ConcurrencyControlInternal for Optimistic {
     ) -> Self::Executor<'a> {
         Self::Executor {
             index,
+            max_tid: 0,
             epoch_guard: self.epoch_fw.acquire(),
             qsbr: self.qsbr.acquire(),
             garbage_values: Default::default(),
@@ -83,7 +84,7 @@ impl Clone for Record {
 }
 
 impl Record {
-    fn lock(&self) {
+    fn lock(&self) -> u64 {
         let backoff = Backoff::new();
         loop {
             let current_tid = self.tid.load(SeqCst);
@@ -96,7 +97,7 @@ impl Record {
                 self.tid
                     .compare_exchange_weak(current_tid, current_tid | LOCKED, SeqCst, SeqCst);
             if result.is_ok() {
-                break;
+                return current_tid;
             }
             backoff.spin();
         }
@@ -143,6 +144,7 @@ pub struct Executor<'a> {
     index: &'a HashIndex<Box<[u8]>, Shared<Record>>,
 
     // executor's state
+    max_tid: u64,
     epoch_guard: EpochGuard<'a>,
     qsbr: QsbrGuard<'a>,
     garbage_values: Vec<Box<[u8]>>,
@@ -228,16 +230,20 @@ impl TransactionExecutor for Executor<'_> {
     }
 
     fn commit(&mut self) -> Result<()> {
-        // validation phase
+        // Phase 1
 
         // the stability of the sort doesn't matter because the keys are unique
         self.write_set.sort_unstable_by(|a, b| a.key.cmp(&b.key));
 
+        // new TID should be
+        // (b) larger than the worker’s most recently chosen TID
+        let mut max_tid = self.max_tid;
+
         for item in &mut self.write_set {
-            let mut should_lock = false;
+            let mut was_occupied = false;
             let record_ptr = match self.index.entry(item.key.clone()) {
                 Entry::Occupied(entry) => {
-                    should_lock = true;
+                    was_occupied = true;
                     *entry.get()
                 }
                 Entry::Vacant(entry) => {
@@ -250,16 +256,23 @@ impl TransactionExecutor for Executor<'_> {
                     record_ptr
                 }
             };
-            if should_lock {
-                unsafe { record_ptr.as_ref() }.lock();
+            if was_occupied {
+                let tid = unsafe { record_ptr.as_ref() }.lock();
+
+                // new TID should be
+                // (a) larger than the TID of any record read or written
+                //     by the transaction
+                max_tid = max_tid.max(tid);
             }
             item.record_ptr
                 .set(record_ptr)
                 .unwrap_or_else(|_| panic!("record_ptr is already set"));
         }
 
-        let epoch = self.epoch_guard.refresh();
+        // serialization point
+        let current_epoch = self.epoch_guard.refresh();
 
+        // Phase 2
         for item in &self.read_set {
             let tid = item
                 .record_ptr
@@ -267,12 +280,31 @@ impl TransactionExecutor for Executor<'_> {
                 .map(|record_ptr| unsafe { record_ptr.as_ref() }.tid.load(SeqCst))
                 .unwrap_or(0);
             if tid != item.tid {
-                // the tid don't match or the record is locked
+                // the TID doesn't match or the record is locked by
+                // another transaction
                 return Err(Error::NotSerializable);
             }
+
+            // new TID should be
+            // (a) larger than the TID of any record read or written
+            //     by the transaction
+            max_tid = max_tid.max(item.tid & !LOCKED);
         }
 
-        // write phase
+        // new TID should be
+        // (c) in the current global epoch
+        let epoch_of_max_tid = max_tid >> EPOCH_POS;
+        debug_assert!(epoch_of_max_tid <= current_epoch);
+        let mut new_tid = if epoch_of_max_tid == current_epoch {
+            max_tid
+        } else {
+            current_epoch << EPOCH_POS
+        };
+        new_tid += 1 << SEQUENCE_POS;
+        debug_assert!(new_tid & LOCKED == 0);
+        self.max_tid = new_tid;
+
+        // Phase 3
         for item in self.write_set.drain(..) {
             let record_ptr = *item.record_ptr.get().unwrap();
             let record = unsafe { record_ptr.as_ref() };
@@ -293,13 +325,7 @@ impl TransactionExecutor for Executor<'_> {
                 debug_assert!(was_removed);
             }
 
-            let prev_tid = record.tid.load(SeqCst);
-            let prev_epoch = prev_tid >> EPOCH_POS;
-            let mut new_tid = epoch << EPOCH_POS;
-            if prev_epoch == epoch {
-                new_tid += 1 << SEQUENCE_POS;
-            }
-            // store new tid and unlock
+            // store new TID and unlock the record
             record.tid.store(new_tid, SeqCst);
 
             if !prev_buf_ptr.is_null() {
