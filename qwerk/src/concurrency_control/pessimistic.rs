@@ -62,9 +62,14 @@ impl Record {
 }
 
 pub struct Executor<'a> {
+    // global state
     index: &'a HashIndex<Box<[u8]>, Shared<Record>>,
+
+    // per-executor state
     qsbr: QsbrGuard<'a>,
     garbage_records: Vec<Shared<Record>>,
+
+    // per-transaction state
     working_set: Vec<WorkingItem>,
 }
 

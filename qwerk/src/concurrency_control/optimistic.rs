@@ -12,12 +12,14 @@ use std::{
 };
 
 const EPOCH_POS: u64 = 32;
-const SEQUENCE_POS: u64 = 1;
+const SEQUENCE_POS: u64 = 2;
+const ABSENT: u64 = 0x2;
 const LOCKED: u64 = 0x1;
 
 // TID
-// bits 63:32] - epoch
-// bits[31:1]  - sequence
+// bits[63:32] - epoch
+// bits[31:2]  - sequence
+// bit [1]     - absent
 // bit [0]     - locked
 
 /// Silo
@@ -88,6 +90,9 @@ impl Record {
         let backoff = Backoff::new();
         loop {
             let current_tid = self.tid.load(SeqCst);
+            if current_tid & ABSENT > 0 {
+                return current_tid;
+            }
             if current_tid & LOCKED > 0 {
                 backoff.snooze();
                 continue;
@@ -103,15 +108,17 @@ impl Record {
         }
     }
 
-    fn unlock(&self) {
-        let prev_tid = self.tid.fetch_and(!LOCKED, SeqCst);
-        debug_assert!(prev_tid & LOCKED > 0);
-    }
-
     fn read(&self) -> RecordSnapshot {
         let backoff = Backoff::new();
         loop {
             let tid1 = self.tid.load(SeqCst);
+            if tid1 & ABSENT > 0 {
+                return RecordSnapshot {
+                    buf_ptr: std::ptr::null_mut(),
+                    len: 0,
+                    tid: tid1,
+                };
+            }
             if tid1 & LOCKED > 0 {
                 backoff.snooze();
                 continue;
@@ -143,14 +150,14 @@ pub struct Executor<'a> {
     // global state
     index: &'a HashIndex<Box<[u8]>, Shared<Record>>,
 
-    // executor's state
+    // per-executor state
     max_tid: u64,
     epoch_guard: EpochGuard<'a>,
     qsbr: QsbrGuard<'a>,
     garbage_values: Vec<Box<[u8]>>,
     garbage_records: Vec<Shared<Record>>,
 
-    // transaction's state
+    // per-transaction state
     read_set: Vec<ReadItem<'a>>,
     write_set: Vec<WriteItem>,
 }
@@ -172,19 +179,18 @@ impl TransactionExecutor for Executor<'_> {
             return Ok(item.value);
         }
 
-        let record_ptr = self.index.peek_with(key, |_, value| *value);
         let key = key.to_vec().into();
+        let record_ptr = self.index.peek_with(&key, |_, value| *value);
         let item = match record_ptr {
             Some(record_ptr) => {
                 let RecordSnapshot { buf_ptr, len, tid } = unsafe { record_ptr.as_ref() }.read();
-                let value = if buf_ptr.is_null() {
-                    None
-                } else {
-                    Some(unsafe { std::slice::from_raw_parts(buf_ptr, len) })
-                };
+                if buf_ptr.is_null() {
+                    // the record was removed by another transaction
+                    return Err(Error::NotSerializable);
+                }
                 ReadItem {
                     key,
-                    value,
+                    value: Some(unsafe { std::slice::from_raw_parts(buf_ptr, len) }),
                     record_ptr: Some(record_ptr),
                     tid,
                 }
@@ -258,6 +264,10 @@ impl TransactionExecutor for Executor<'_> {
             };
             if was_occupied {
                 let tid = unsafe { record_ptr.as_ref() }.lock();
+                if tid & ABSENT > 0 {
+                    // the record was removed by another transaction
+                    return Err(Error::NotSerializable);
+                }
 
                 // new TID should be
                 // (a) larger than the TID of any record read or written
@@ -284,6 +294,7 @@ impl TransactionExecutor for Executor<'_> {
                 // another transaction
                 return Err(Error::NotSerializable);
             }
+            debug_assert!(item.tid & ABSENT == 0);
 
             // new TID should be
             // (a) larger than the TID of any record read or written
@@ -320,13 +331,15 @@ impl TransactionExecutor for Executor<'_> {
             let prev_buf_ptr = record.buf_ptr.swap(new_buf_ptr, SeqCst);
             let prev_len = record.len.swap(new_len, SeqCst);
 
+            let mut new_record_tid = new_tid;
             if new_buf_ptr.is_null() {
                 let was_removed = self.index.remove(&item.key);
                 debug_assert!(was_removed);
+                new_record_tid |= ABSENT;
             }
 
             // store new TID and unlock the record
-            record.tid.store(new_tid, SeqCst);
+            record.tid.store(new_record_tid, SeqCst);
 
             if !prev_buf_ptr.is_null() {
                 self.garbage_values.push(unsafe {
@@ -349,12 +362,16 @@ impl TransactionExecutor for Executor<'_> {
             };
 
             let record = unsafe { record_ptr.as_ref() };
+            let mut new_record_tid = record.tid.load(SeqCst) & !LOCKED;
+
             let value_is_null = record.buf_ptr.load(SeqCst).is_null();
             if value_is_null {
                 let was_removed = self.index.remove(&item.key);
                 debug_assert!(was_removed);
+                new_record_tid |= ABSENT;
             }
-            record.unlock();
+
+            record.tid.store(new_record_tid, SeqCst);
 
             if value_is_null {
                 self.garbage_records.push(record_ptr);
