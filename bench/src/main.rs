@@ -37,7 +37,7 @@ struct Cli {
     working_set: usize,
 
     #[arg(long, default_value_t = 0.5)]
-    contention: f64,
+    theta: f64,
 
     #[arg(long, value_enum, default_value_t = Protocol::Pessimistic)]
     protocol: Protocol,
@@ -170,7 +170,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
                 let mut worker = state.db.spawn_worker();
                 let mut rng = rand::rngs::SmallRng::from_entropy();
                 let mut generator =
-                    NumberGenerator::new(&mut rng, &state.latest, cli.records, cli.contention);
+                    NumberGenerator::new(&mut rng, &state.latest, cli.records, cli.theta);
                 let mut stats = Statistics::default();
                 let mut keys = Vec::with_capacity(cli.working_set);
                 let payload = vec![0; cli.payload];
@@ -280,7 +280,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
             workload: format!("{:?}", cli.workload),
             protocol: format!("{:?}", cli.protocol),
             threads: cli.threads,
-            theta: cli.contention,
+            theta: cli.theta,
             read_proportion: cli.read_proportion,
         },
     )?;
