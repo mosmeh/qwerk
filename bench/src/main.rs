@@ -70,11 +70,9 @@ fn main() -> anyhow::Result<()> {
         Protocol::Optimistic => run_benchmark::<Optimistic>(cli),
         Protocol::Pessimistic => run_benchmark::<Pessimistic>(cli),
     }
-
-    Ok(())
 }
 
-fn run_benchmark<C: ConcurrencyControl>(cli: Cli) {
+fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
     let workload = match cli.workload {
         WorkloadKind::A => Workload {
             read_proportion: 50,
@@ -98,7 +96,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) {
             request_distribution: RequestDistribution::Zipfian,
         },
         WorkloadKind::Variable => {
-            let read_proportion = ((100.0 * cli.read_proportion.unwrap()) as u32).min(100);
+            let read_proportion = ((100.0 * cli.read_proportion.unwrap()) as u32).clamp(0, 100);
             Workload {
                 read_proportion,
                 update_proportion: 100 - read_proportion,
@@ -203,7 +201,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) {
                     }
 
                     let mut txn = worker.begin_transaction();
-                    for key in keys.drain(..) {
+                    for key in &keys {
                         match op {
                             Operation::Read => {
                                 let _ = txn.get(key);
@@ -212,7 +210,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) {
                                 let _ = txn.insert(key, &payload);
                             }
                             Operation::Rmw => {
-                                let _ = txn.get(&key);
+                                let _ = txn.get(key);
                                 let _ = txn.insert(key, &payload);
                             }
                         }
@@ -226,6 +224,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) {
                     } else {
                         break;
                     }
+                    keys.clear();
                 }
                 stats
             })
@@ -284,9 +283,9 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) {
             theta: cli.contention,
             read_proportion: cli.read_proportion,
         },
-    )
-    .unwrap();
-    stdout.write_all(b"\n").unwrap();
+    )?;
+    stdout.write_all(b"\n")?;
+    Ok(())
 }
 
 struct NumberGenerator {

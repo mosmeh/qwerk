@@ -1,8 +1,8 @@
-use super::{ConcurrencyControlInternal, TransactionExecutor};
+use super::{ConcurrencyControl, ConcurrencyControlInternal, TransactionExecutor};
 use crate::{
     lock::NoWaitRwLock,
     qsbr::{Qsbr, QsbrGuard},
-    ConcurrencyControl, Error, Result, Shared,
+    Error, Result, Shared,
 };
 use scc::{hash_index::Entry, HashIndex};
 use std::cell::UnsafeCell;
@@ -122,17 +122,20 @@ impl TransactionExecutor for Executor<'_> {
             .find(|item| item.key.as_ref() == key);
         if let Some(item) = item {
             let record = unsafe { item.record_ptr.as_ref() };
-            if matches!(item.kind, ItemKind::Read) {
-                if !record.lock.try_upgrade() {
-                    return Err(Error::NotSerializable);
+            match &item.kind {
+                ItemKind::Read => {
+                    if !record.lock.try_upgrade() {
+                        return Err(Error::NotSerializable);
+                    }
+                    let value = value.map(|value| value.to_vec().into());
+                    let original_value = unsafe { record.replace(value) };
+                    item.kind = ItemKind::Write { original_value };
                 }
-                let value = value.map(|value| value.to_vec().into());
-                let original_value = unsafe { record.replace(value) };
-                item.kind = ItemKind::Write { original_value };
-                return Ok(());
+                ItemKind::Write { .. } => {
+                    let value = value.map(|value| value.to_vec().into());
+                    unsafe { record.set(value) };
+                }
             }
-            let value = value.map(|value| value.to_vec().into());
-            unsafe { record.set(value) };
             return Ok(());
         }
 

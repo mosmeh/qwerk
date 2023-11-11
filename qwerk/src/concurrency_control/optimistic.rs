@@ -1,12 +1,15 @@
-use super::{ConcurrencyControlInternal, Shared, TransactionExecutor};
+use super::{ConcurrencyControl, ConcurrencyControlInternal, Shared, TransactionExecutor};
 use crate::{
     epoch::{EpochFramework, EpochGuard},
     qsbr::{Qsbr, QsbrGuard},
-    ConcurrencyControl, Error, Result,
+    Error, Result,
 };
 use crossbeam_utils::Backoff;
 use scc::{hash_index::Entry, HashIndex};
-use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::SeqCst};
+use std::{
+    cell::OnceCell,
+    sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::SeqCst},
+};
 
 const EPOCH_POS: u64 = 32;
 const SEQUENCE_POS: u64 = 1;
@@ -219,7 +222,7 @@ impl TransactionExecutor for Executor<'_> {
         self.write_set.push(WriteItem {
             key: key.to_vec().into(),
             value,
-            record_ptr: None,
+            record_ptr: Default::default(),
         });
         Ok(())
     }
@@ -250,7 +253,9 @@ impl TransactionExecutor for Executor<'_> {
             if should_lock {
                 unsafe { record_ptr.as_ref() }.lock();
             }
-            item.record_ptr = Some(record_ptr);
+            item.record_ptr
+                .set(record_ptr)
+                .unwrap_or_else(|_| panic!("record_ptr is already set"));
         }
 
         let epoch = self.epoch_guard.refresh();
@@ -269,7 +274,7 @@ impl TransactionExecutor for Executor<'_> {
 
         // write phase
         for item in self.write_set.drain(..) {
-            let record_ptr = item.record_ptr.unwrap();
+            let record_ptr = *item.record_ptr.get().unwrap();
             let record = unsafe { record_ptr.as_ref() };
 
             let (new_buf_ptr, new_len) = match item.value {
@@ -313,7 +318,7 @@ impl TransactionExecutor for Executor<'_> {
 
     fn abort(&mut self) {
         for item in &self.write_set {
-            let Some(record_ptr) = item.record_ptr else {
+            let Some(&record_ptr) = item.record_ptr.get() else {
                 continue;
             };
 
@@ -370,5 +375,5 @@ struct ReadItem<'a> {
 struct WriteItem {
     key: Box<[u8]>,
     value: Option<Box<[u8]>>,
-    record_ptr: Option<Shared<Record>>,
+    record_ptr: OnceCell<Shared<Record>>,
 }
