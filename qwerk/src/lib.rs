@@ -13,9 +13,11 @@ use shared::Shared;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Serialization failure.
     #[error("serialization failure")]
     NotSerializable,
 
+    /// Attempted to perform an operation on an aborted transaction.
     #[error("attempted to perform an operation on the aborted transaction")]
     AlreadyAborted,
 }
@@ -43,6 +45,10 @@ impl<C: ConcurrencyControl> Database<C> {
 }
 
 impl<C: ConcurrencyControl> Database<C> {
+    /// Spawns a [`Worker`], which can be used to perform transactions.
+    ///
+    /// You usually should spawn one [`Worker`] per thread, and reuse the
+    /// [`Worker`] for multiple transactions.
     pub fn spawn_worker(&self) -> Worker<'_, C> {
         Worker {
             txn_executor: self.concurrency_control.spawn_executor(&self.index),
@@ -66,26 +72,29 @@ pub struct Worker<'a, C: ConcurrencyControl + 'a> {
 }
 
 impl<'db, C: ConcurrencyControl> Worker<'db, C> {
+    /// Begins a new transaction.
+    ///
+    /// A [`Worker`] can only have one active transaction at a time.
     pub fn begin_transaction<'worker>(&'worker mut self) -> Transaction<'db, 'worker, C> {
         // Rather than instantiating a TransactionExecutor every time
-        // a transaction begins, the single instance is reused so that allocated
-        // buffers can be reused.
+        // a transaction begins, the single instance is reused so that buffers
+        // allocated by TransactionExecutor can be reused.
         self.txn_executor.begin_transaction();
         Transaction {
             worker: self,
-            is_running: true,
+            is_active: true,
         }
     }
 }
 
 pub struct Transaction<'db, 'worker, C: ConcurrencyControl> {
     worker: &'worker mut Worker<'db, C>,
-    is_running: bool,
+    is_active: bool,
 }
 
 impl<C: ConcurrencyControl> Transaction<'_, '_, C> {
     pub fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<&[u8]>> {
-        if !self.is_running {
+        if !self.is_active {
             return Err(Error::AlreadyAborted);
         }
 
@@ -132,7 +141,7 @@ impl<C: ConcurrencyControl> Transaction<'_, '_, C> {
     /// [`get`]: #method.get
     pub fn commit(mut self) -> Result<()> {
         self.try_mutate(|executor| executor.commit())?;
-        self.is_running = false;
+        self.is_active = false;
         Ok(())
     }
 
@@ -147,7 +156,7 @@ impl<C: ConcurrencyControl> Transaction<'_, '_, C> {
     where
         F: FnOnce(&mut C::Executor<'_>) -> Result<T>,
     {
-        if !self.is_running {
+        if !self.is_active {
             return Err(Error::AlreadyAborted);
         }
         let result = f(&mut self.worker.txn_executor);
@@ -158,10 +167,10 @@ impl<C: ConcurrencyControl> Transaction<'_, '_, C> {
     }
 
     fn do_abort(&mut self) {
-        if !self.is_running {
+        if !self.is_active {
             return;
         }
-        self.is_running = false;
+        self.is_active = false;
         self.worker.txn_executor.abort();
     }
 }

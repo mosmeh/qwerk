@@ -26,12 +26,20 @@ pub struct QsbrGuard<'a> {
 }
 
 impl QsbrGuard<'_> {
+    /// Declares that the owner of this guard is on a quiescent state.
+    ///
+    /// Returns the current global counter.
     pub fn quiesce(&self) -> u64 {
         let counter = self.qsbr.global_counter.load(SeqCst);
         self.local_counter.store(counter, SeqCst);
         counter
     }
 
+    /// Waits until all owners of guards `acquire`d from the same [`Qsbr`]
+    /// experience quiescent states at least once.
+    ///
+    /// Returns a lower bound of the counter value seen by all [`QsbrGuard`]s
+    /// for the same [`Qsbr`].
     pub fn sync(&self) -> u64 {
         let counter = self.qsbr.global_counter.fetch_add(1, SeqCst) + 1;
         self.local_counter.store(counter, SeqCst);

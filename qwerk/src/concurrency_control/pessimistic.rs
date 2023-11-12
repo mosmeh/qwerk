@@ -7,7 +7,10 @@ use crate::{
 use scc::{hash_index::Entry, HashIndex};
 use std::cell::UnsafeCell;
 
-/// Strong strict two phase locking with NO_WAIT deadlock prevention
+/// Pessimistic concurrency control.
+///
+/// This is an implementation of strong strict two phase locking with
+/// NO_WAIT deadlock prevention.
 pub struct Pessimistic {
     qsbr: Qsbr,
 }

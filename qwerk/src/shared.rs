@@ -1,6 +1,6 @@
 use std::ptr::NonNull;
 
-/// A wrapper around a `NonNull<T>` that indicates that the pointee is shared.
+/// A wrapper around a [`NonNull<T>`] that indicates that the pointee is shared.
 pub struct Shared<T>(NonNull<T>);
 
 impl<T> Clone for Shared<T> {

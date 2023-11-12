@@ -80,6 +80,9 @@ pub struct EpochGuard<'a> {
 }
 
 impl EpochGuard<'_> {
+    /// Takes a snapshot of the current global epoch.
+    ///
+    /// Returns the current global epoch.
     pub fn refresh(&self) -> u64 {
         let epoch = self.global_epoch.load(SeqCst);
         self.local_epoch.store(epoch, SeqCst);
