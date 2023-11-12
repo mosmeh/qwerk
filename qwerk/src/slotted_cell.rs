@@ -101,7 +101,8 @@ pub struct Slot<'a, T> {
 
 impl<T> Drop for Slot<'_, T> {
     fn drop(&mut self) {
-        self.entry.is_present.store(false, SeqCst);
+        let was_present = self.entry.is_present.swap(false, SeqCst);
+        assert!(was_present);
     }
 }
 
