@@ -19,7 +19,7 @@ use std::{
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[derive(Parser)]
+#[derive(Parser, Serialize)]
 struct Cli {
     #[arg(long, default_value_t = 8)]
     threads: usize,
@@ -49,13 +49,13 @@ struct Cli {
     read_proportion: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, ValueEnum, Serialize)]
 enum Protocol {
     Optimistic,
     Pessimistic,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, ValueEnum, Serialize)]
 enum WorkloadKind {
     A,
     B,
@@ -118,7 +118,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
         db,
         barrier: Barrier::new(cli.threads + 1),
         is_running: true.into(),
-        latest: 0.into(),
+        latest: cli.records.into(),
     });
 
     let num_threads = match std::thread::available_parallelism() {
@@ -155,9 +155,13 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
     }
 
     #[cfg(feature = "affinity")]
-    let core_ids = core_affinity::get_core_ids().unwrap();
-    #[cfg(feature = "affinity")]
-    assert!(core_ids.len() >= cli.threads);
+    let core_ids = {
+        use rand::seq::SliceRandom;
+        let mut core_ids = core_affinity::get_core_ids().unwrap();
+        assert!(core_ids.len() >= cli.threads);
+        core_ids.shuffle(&mut rand::rngs::SmallRng::from_entropy());
+        core_ids
+    };
 
     eprintln!("Spawning worker threads");
     let clients: Vec<_> = (0..cli.threads)
@@ -195,7 +199,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
                             match workload.request_distribution {
                                 RequestDistribution::Uniform => generator.uniform(&mut rng),
                                 RequestDistribution::Zipfian => {
-                                    generator.next(&mut rng, has_insert, &state.latest)
+                                    generator.next(&mut rng, has_insert)
                                 }
                             }
                         };
@@ -204,27 +208,28 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
 
                     let mut txn = worker.begin_transaction();
                     for key in &keys {
+                        use std::hint::black_box;
                         match op {
                             Operation::Read => {
-                                let _ = txn.get(key);
+                                let _ = black_box(txn.get(black_box(key)));
                             }
                             Operation::Update | Operation::Insert => {
-                                let _ = txn.insert(key, &payload);
+                                let _ = black_box(txn.insert(black_box(key), black_box(&payload)));
                             }
                             Operation::Rmw => {
-                                let _ = txn.get(key);
-                                let _ = txn.insert(key, &payload);
+                                let key = black_box(key);
+                                let _ = black_box(txn.get(key));
+                                let _ = black_box(txn.insert(key, black_box(&payload)));
                             }
                         }
                     }
                     let result = txn.commit();
-                    if state.is_running.load(Ordering::Relaxed) {
-                        match result {
-                            Ok(()) => stats.num_commits += 1,
-                            Err(_) => stats.num_aborts += 1,
-                        }
-                    } else {
+                    if !state.is_running.load(Ordering::Relaxed) {
                         break;
+                    }
+                    match result {
+                        Ok(()) => stats.num_commits += 1,
+                        Err(_) => stats.num_aborts += 1,
                     }
                     keys.clear();
                 }
@@ -252,10 +257,8 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
     eprintln!("Elapsed\t{:.3?}", elapsed);
     eprintln!("Commits\t{}", stats.num_commits);
     eprintln!("Aborts\t{}", stats.num_aborts);
-    eprintln!(
-        "Abort rate\t{:.3}",
-        stats.num_aborts as f64 / (stats.num_commits + stats.num_aborts) as f64
-    );
+    let abort_rate = stats.num_aborts as f64 / (stats.num_commits + stats.num_aborts) as f64;
+    eprintln!("Abort rate\t{:.3}", abort_rate);
     let tps = (stats.num_commits as f64 / elapsed.as_secs_f64()) as u64;
     eprintln!("TPS\t{}", tps);
 
@@ -265,11 +268,9 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
         commits: u64,
         aborts: u64,
         tps: u64,
-        workload: String,
-        protocol: String,
-        threads: usize,
-        theta: f64,
-        read_proportion: Option<f64>,
+        abort_rate: f64,
+        #[serde(flatten)]
+        args: Cli,
     }
     let mut stdout = std::io::stdout().lock();
     serde_json::ser::to_writer_pretty(
@@ -279,18 +280,15 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
             commits: stats.num_commits,
             aborts: stats.num_aborts,
             tps,
-            workload: format!("{:?}", cli.workload),
-            protocol: format!("{:?}", cli.protocol),
-            threads: cli.threads,
-            theta: cli.theta,
-            read_proportion: cli.read_proportion,
+            abort_rate,
+            args: cli,
         },
     )?;
     stdout.write_all(b"\n")?;
     Ok(())
 }
 
-struct NumberGenerator {
+struct NumberGenerator<'a> {
     uniform: Uniform<u64>,
     max: u64,
     theta: f64,
@@ -299,15 +297,13 @@ struct NumberGenerator {
     zeta2theta: f64,
     zeta_n: f64,
     eta: f64,
+    latest: &'a AtomicU64,
 }
 
-impl NumberGenerator {
-    fn new<R: Rng>(rng: &mut R, latest: &AtomicU64, record_count: u64, theta: f64) -> Self {
+impl<'a> NumberGenerator<'a> {
+    fn new<R: Rng>(rng: &mut R, latest: &'a AtomicU64, record_count: u64, theta: f64) -> Self {
         let max = record_count - 1;
-        let mut zeta2theta = 0.0;
-        for i in 0..2 {
-            zeta2theta += 1.0 / f64::powf((i + 1) as f64, theta);
-        }
+        let zeta2theta = (0..2).map(|i| 1.0 / f64::powf((i + 1) as f64, theta)).sum();
         let mut this = Self {
             uniform: Uniform::new(0, record_count + 1),
             max,
@@ -317,9 +313,9 @@ impl NumberGenerator {
             zeta2theta,
             eta: (1.0 - f64::powf(2.0 / max as f64, 1.0 - theta)) / (1.0 - zeta2theta / 0.0),
             zeta_n: 0.0,
+            latest,
         };
-        this.next(rng, false, latest);
-        let _ = latest.compare_exchange(0, record_count, Ordering::SeqCst, Ordering::SeqCst);
+        this.next(rng, false);
         this
     }
 
@@ -327,9 +323,9 @@ impl NumberGenerator {
         self.uniform.sample(rng)
     }
 
-    fn next<R: Rng>(&mut self, rng: &mut R, is_insert: bool, latest: &AtomicU64) -> u64 {
+    fn next<R: Rng>(&mut self, rng: &mut R, is_insert: bool) -> u64 {
         let max = if is_insert {
-            latest.load(Ordering::Relaxed)
+            self.latest.load(Ordering::Relaxed)
         } else {
             self.max
         };
@@ -360,12 +356,11 @@ impl NumberGenerator {
     }
 
     fn zeta(&mut self, st: u64, n: u64, initial_sum: f64) -> f64 {
-        let mut sum = initial_sum;
         self.count_for_zeta = n;
-        for i in st..n {
-            sum += 1.0 / f64::powf((i + 1) as f64, self.theta);
-        }
-        sum
+        (st..n)
+            .map(|i| 1.0 / f64::powf((i + 1) as f64, self.theta))
+            .sum::<f64>()
+            + initial_sum
     }
 }
 
