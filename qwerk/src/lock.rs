@@ -22,7 +22,11 @@ impl NoWaitRwLock {
     }
 
     pub fn is_locked(&self) -> bool {
-        self.0.load(SeqCst) != 0
+        self.0.load(SeqCst) > 0
+    }
+
+    pub fn is_locked_exclusive(&self) -> bool {
+        self.0.load(SeqCst) & EXCLUSIVE > 0
     }
 
     pub fn try_lock_shared(&self) -> bool {
@@ -46,7 +50,7 @@ impl NoWaitRwLock {
 
     pub fn try_upgrade(&self) -> bool {
         let current = self.0.load(SeqCst);
-        debug_assert!(current >= READERS);
+        assert!(current >= READERS);
         let num_readers = current >> 1;
         if num_readers > 1 {
             return false;
@@ -58,11 +62,12 @@ impl NoWaitRwLock {
 
     pub fn unlock_shared(&self) {
         let prev = self.0.fetch_sub(READERS, SeqCst);
-        debug_assert_eq!(prev & EXCLUSIVE, 0);
-        debug_assert!((prev >> 1) > 0);
+        assert_eq!(prev & EXCLUSIVE, 0);
+        assert!((prev >> 1) > 0);
     }
 
     pub fn unlock_exclusive(&self) {
-        self.0.store(0, SeqCst);
+        let prev = self.0.swap(0, SeqCst);
+        assert!(prev & EXCLUSIVE > 0);
     }
 }

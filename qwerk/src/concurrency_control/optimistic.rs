@@ -294,7 +294,7 @@ impl TransactionExecutor for Executor<'_> {
                 // another transaction
                 return Err(Error::NotSerializable);
             }
-            debug_assert!(item.tid & ABSENT == 0);
+            assert!(item.tid & ABSENT == 0);
 
             // new TID should be
             // (a) larger than the TID of any record read or written
@@ -305,14 +305,14 @@ impl TransactionExecutor for Executor<'_> {
         // new TID should be
         // (c) in the current global epoch
         let epoch_of_max_tid = max_tid >> EPOCH_POS;
-        debug_assert!(epoch_of_max_tid <= current_epoch);
+        assert!(epoch_of_max_tid <= current_epoch);
         let mut new_tid = if epoch_of_max_tid == current_epoch {
             max_tid
         } else {
             current_epoch << EPOCH_POS
         };
         new_tid += 1 << SEQUENCE_POS;
-        debug_assert!(new_tid & LOCKED == 0);
+        assert!(new_tid & LOCKED == 0);
         self.max_tid = new_tid;
 
         // Phase 3
@@ -334,7 +334,7 @@ impl TransactionExecutor for Executor<'_> {
             let mut new_record_tid = new_tid;
             if new_buf_ptr.is_null() {
                 let was_removed = self.index.remove(&item.key);
-                debug_assert!(was_removed);
+                assert!(was_removed);
                 new_record_tid |= ABSENT;
             }
 
@@ -367,7 +367,7 @@ impl TransactionExecutor for Executor<'_> {
             let value_is_null = record.buf_ptr.load(SeqCst).is_null();
             if value_is_null {
                 let was_removed = self.index.remove(&item.key);
-                debug_assert!(was_removed);
+                assert!(was_removed);
                 new_record_tid |= ABSENT;
             }
 

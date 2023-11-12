@@ -46,17 +46,17 @@ unsafe impl Sync for Record {}
 
 impl Record {
     unsafe fn get(&self) -> Option<&[u8]> {
-        debug_assert!(self.lock.is_locked());
+        assert!(self.lock.is_locked());
         (*self.value.get()).as_deref()
     }
 
     unsafe fn set(&self, value: Option<Box<[u8]>>) {
-        debug_assert!(self.lock.is_locked());
+        assert!(self.lock.is_locked_exclusive());
         *self.value.get() = value;
     }
 
     unsafe fn replace(&self, value: Option<Box<[u8]>>) -> Option<Box<[u8]>> {
-        debug_assert!(self.lock.is_locked());
+        assert!(self.lock.is_locked_exclusive());
         std::mem::replace(&mut *self.value.get(), value)
     }
 }
