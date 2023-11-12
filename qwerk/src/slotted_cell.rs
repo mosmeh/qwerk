@@ -29,8 +29,9 @@ impl<T: Default> SlottedCell<T> {
         }
 
         Self {
-            // SAFETY: AtomicPtr has the same representation as a pointer and arrays have the same
-            // representation as a sequence of their inner type.
+            // SAFETY: AtomicPtr has the same representation as a pointer and
+            //         arrays have the same representation as
+            //         a sequence of their inner type.
             buckets: unsafe { std::mem::transmute(buckets) },
         }
     }
@@ -38,7 +39,7 @@ impl<T: Default> SlottedCell<T> {
     /// Allocates a slot in the cell.
     ///
     /// This may return an existing slot that was previously occupied by another
-    /// [`Slot`]. Thus the initial value of the slot may not be
+    /// [`Slot`]. Thus the value of the returned slot may not be
     /// the default value of `T`.
     pub fn alloc_slot(&self) -> Slot<T> {
         for (bucket_index, bucket) in self.buckets.iter().enumerate() {
@@ -49,7 +50,10 @@ impl<T: Default> SlottedCell<T> {
                 let result = bucket.compare_exchange(std::ptr::null_mut(), new, SeqCst, SeqCst);
                 match result {
                     Ok(_) => new,
-                    Err(ptr) => ptr,
+                    Err(ptr) => {
+                        unsafe { dealloc_bucket(new, bucket_len) };
+                        ptr
+                    }
                 }
             } else {
                 bucket_ptr
@@ -81,7 +85,7 @@ impl<T> Drop for SlottedCell<T> {
                 continue;
             }
             let len = bucket_len(i);
-            let _ = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(ptr, len)) };
+            unsafe { dealloc_bucket(ptr, len) };
         }
     }
 }
@@ -95,6 +99,10 @@ struct Entry<T> {
 fn alloc_bucket<T: Default>(len: usize) -> *mut Entry<T> {
     let entries = (0..len).map(|_| Entry::<T>::default()).collect();
     Box::into_raw(entries).cast()
+}
+
+unsafe fn dealloc_bucket<T>(ptr: *mut Entry<T>, len: usize) {
+    let _ = Box::from_raw(std::slice::from_raw_parts_mut(ptr, len));
 }
 
 const fn bucket_len(index: usize) -> usize {
