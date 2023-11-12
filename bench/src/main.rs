@@ -133,10 +133,11 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
             let to = cli.records * (thread_index as u64 + 1) / num_threads as u64;
             let payload = vec![0; cli.payload];
             std::thread::spawn(move || {
+                let mut buf = itoa::Buffer::new();
                 let mut worker = state.db.spawn_worker();
                 let mut txn = worker.begin_transaction();
                 for i in from..to {
-                    let key = format!("{}", i).into_bytes();
+                    let key = buf.format(i);
                     txn.insert(key, &payload).unwrap();
                 }
                 txn.commit().unwrap();
@@ -182,6 +183,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
                 ];
                 let op_dist = WeightedIndex::new(op_weights).unwrap();
                 let has_insert = workload.insert_proportion > 0;
+                let mut buf = itoa::Buffer::new();
 
                 state.barrier.wait();
                 while state.is_running.load(Ordering::SeqCst) {
@@ -197,7 +199,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
                                 }
                             }
                         };
-                        keys.push(format!("{}", key).into_bytes());
+                        keys.push(buf.format(key).as_bytes().to_vec().into_boxed_slice());
                     }
 
                     let mut txn = worker.begin_transaction();
