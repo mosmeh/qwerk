@@ -10,6 +10,7 @@ const EXCLUSIVE: u64 = 0x1;
 const READERS: u64 = 0x2;
 const READERS_FULL: u64 = !EXCLUSIVE;
 
+/// A reader-writer lock that does not block.
 pub struct NoWaitRwLock(AtomicU64);
 
 impl NoWaitRwLock {
@@ -48,6 +49,7 @@ impl NoWaitRwLock {
             .is_ok()
     }
 
+    /// Try to upgrade a shared lock to an exclusive lock.
     pub fn try_upgrade(&self) -> bool {
         let current = self.0.load(SeqCst);
         assert!(current >= READERS);

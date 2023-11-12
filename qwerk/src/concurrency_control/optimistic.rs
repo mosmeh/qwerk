@@ -11,18 +11,20 @@ use std::{
     sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::SeqCst},
 };
 
-const EPOCH_POS: u64 = 32;
-const SEQUENCE_POS: u64 = 2;
-const ABSENT: u64 = 0x2;
-const LOCKED: u64 = 0x1;
-
 // TID
 // bits[63:32] - epoch
 // bits[31:2]  - sequence
 // bit [1]     - absent
 // bit [0]     - locked
 
-/// Silo
+const EPOCH_POS: u64 = 32;
+const SEQUENCE_POS: u64 = 2;
+const ABSENT: u64 = 0x2;
+const LOCKED: u64 = 0x1;
+
+/// Optimistic concurrency control.
+///
+/// This is an implementation of Silo.
 pub struct Optimistic {
     epoch_fw: EpochFramework,
     qsbr: Qsbr,
@@ -86,7 +88,10 @@ impl Clone for Record {
 }
 
 impl Record {
-    fn lock(&self) -> u64 {
+    /// Locks the record if it is present.
+    ///
+    /// Returns the current TID.
+    fn lock_if_present(&self) -> u64 {
         let backoff = Backoff::new();
         loop {
             let current_tid = self.tid.load(SeqCst);
@@ -108,6 +113,7 @@ impl Record {
         }
     }
 
+    /// Optimistically reads the record.
     fn read(&self) -> RecordSnapshot {
         let backoff = Backoff::new();
         loop {
@@ -169,11 +175,13 @@ impl TransactionExecutor for Executor<'_> {
     }
 
     fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>> {
+        // ensures read-your-writes
         let item = self.write_set.iter().find(|item| item.key.as_ref() == key);
         if let Some(item) = item {
             return Ok(item.value.as_deref());
         }
 
+        // ensures repeatable reads
         let item = self.read_set.iter().find(|item| item.key.as_ref() == key);
         if let Some(item) = item {
             return Ok(item.value);
@@ -263,7 +271,7 @@ impl TransactionExecutor for Executor<'_> {
                 }
             };
             if was_occupied {
-                let tid = unsafe { record_ptr.as_ref() }.lock();
+                let tid = unsafe { record_ptr.as_ref() }.lock_if_present();
                 if tid & ABSENT > 0 {
                     // the record was removed by another transaction
                     return Err(Error::NotSerializable);

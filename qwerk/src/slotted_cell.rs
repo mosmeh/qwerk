@@ -8,6 +8,7 @@ use std::{
 
 const NUM_BUCKETS: usize = (usize::BITS - 1) as usize;
 
+/// A cell that can store multiple values in locations called slots.
 pub struct SlottedCell<T> {
     buckets: [AtomicPtr<Entry<T>>; NUM_BUCKETS],
 }
@@ -34,6 +35,11 @@ impl<T: Default> SlottedCell<T> {
         }
     }
 
+    /// Allocates a slot in the cell.
+    ///
+    /// This may return an existing slot that was previously occupied by another
+    /// [`Slot`]. Thus the initial value of the slot may not be
+    /// the default value of `T`.
     pub fn alloc_slot(&self) -> Slot<T> {
         for (bucket_index, bucket) in self.buckets.iter().enumerate() {
             let bucket_len = bucket_len(bucket_index);
@@ -95,6 +101,12 @@ const fn bucket_len(index: usize) -> usize {
     1 << index
 }
 
+/// A slot in a [`SlottedCell`].
+///
+/// Dropping a `Slot` will mark a slot as free and allow it to be
+/// reused by a subsequent call to [`SlottedCell::alloc_slot`].
+/// However, the value will not be dropped and will remain in memory until
+/// the [`SlottedCell`] is dropped.
 pub struct Slot<'a, T> {
     entry: &'a Entry<T>,
 }
@@ -114,6 +126,10 @@ impl<T> Deref for Slot<'_, T> {
     }
 }
 
+/// An iterator over the values stored in slots of a [`SlottedCell`].
+///
+/// Note that while you are holding a reference to a slot, the slot may be
+/// unassigned from [`Slot`] and assigned to another [`Slot`].
 pub struct Iter<'a, T> {
     cell: &'a SlottedCell<T>,
     bucket_index: usize,

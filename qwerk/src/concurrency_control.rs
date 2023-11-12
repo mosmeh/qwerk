@@ -15,6 +15,8 @@ pub trait ConcurrencyControlInternal: Send + Sync + 'static {
     where
         Self: 'a;
 
+    // We need this because we don't want to expose implementations of
+    // `Default` to the user.
     fn init() -> Self;
 
     fn spawn_executor<'a>(
@@ -28,5 +30,10 @@ pub trait TransactionExecutor {
     fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>>;
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()>;
     fn commit(&mut self) -> Result<()>;
+
+    /// Aborts the transaction.
+    ///
+    /// Called when a user requests an abort, or when `Err` is returned from
+    /// `read`, `write`, or `commit`.
     fn abort(&mut self);
 }
