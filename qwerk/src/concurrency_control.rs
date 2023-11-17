@@ -7,6 +7,8 @@ pub use pessimistic::Pessimistic;
 use crate::{Result, Shared};
 use scc::HashIndex;
 
+const GC_THRESHOLD_BYTES: usize = 4096;
+
 pub trait ConcurrencyControl: ConcurrencyControlInternal {}
 
 pub trait ConcurrencyControlInternal: Send + Sync + 'static {
