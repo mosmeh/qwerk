@@ -1,6 +1,7 @@
 use std::ptr::NonNull;
 
-/// A wrapper around a [`NonNull<T>`] that indicates that the pointee is shared.
+/// A wrapper around a [`NonNull<T>`] that indicates that the pointee is
+/// a heap-allocated shared object.
 pub struct Shared<T>(NonNull<T>);
 
 impl<T> Clone for Shared<T> {
@@ -28,10 +29,6 @@ impl<T> Shared<T> {
     #[must_use]
     pub unsafe fn into_box(this: Self) -> Box<T> {
         Box::from_raw(this.0.as_ptr())
-    }
-
-    pub const fn as_ptr(self) -> *mut T {
-        self.0.as_ptr()
     }
 
     pub const unsafe fn as_ref<'a>(&self) -> &'a T {
