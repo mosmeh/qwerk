@@ -226,7 +226,11 @@ impl TransactionExecutor for Executor<'_> {
 
 impl Executor<'_> {
     fn finish_txn(&mut self) {
-        if self.garbage_records.len() >= 128 {
+        let garbage_bytes = self
+            .garbage_records
+            .len()
+            .saturating_mul(std::mem::size_of::<Record>());
+        if garbage_bytes >= super::GC_THRESHOLD_BYTES {
             self.collect_garbage();
         } else {
             self.qsbr.quiesce();

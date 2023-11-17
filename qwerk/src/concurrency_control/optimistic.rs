@@ -52,6 +52,7 @@ impl ConcurrencyControlInternal for Optimistic {
             max_tid: 0,
             epoch_guard: self.epoch_fw.acquire(),
             qsbr: self.qsbr.acquire(),
+            garbage_bytes: 0,
             garbage_values: Default::default(),
             garbage_records: Default::default(),
             read_set: Default::default(),
@@ -160,6 +161,7 @@ pub struct Executor<'a> {
     max_tid: u64,
     epoch_guard: EpochGuard<'a>,
     qsbr: QsbrGuard<'a>,
+    garbage_bytes: usize,
     garbage_values: Vec<Box<[u8]>>,
     garbage_records: Vec<Shared<Record>>,
 
@@ -353,9 +355,11 @@ impl TransactionExecutor for Executor<'_> {
                 self.garbage_values.push(unsafe {
                     Box::from_raw(std::slice::from_raw_parts_mut(prev_buf_ptr, prev_len))
                 });
+                self.garbage_bytes += prev_len;
             }
             if new_buf_ptr.is_null() {
                 self.garbage_records.push(record_ptr);
+                self.garbage_bytes += std::mem::size_of::<Record>();
             }
         }
 
@@ -383,6 +387,7 @@ impl TransactionExecutor for Executor<'_> {
 
             if value_is_null {
                 self.garbage_records.push(record_ptr);
+                self.garbage_bytes += std::mem::size_of::<Record>();
             }
         }
 
@@ -392,7 +397,7 @@ impl TransactionExecutor for Executor<'_> {
 
 impl Executor<'_> {
     fn finish_txn(&mut self) {
-        if self.garbage_values.len() + self.garbage_records.len() >= 128 {
+        if self.garbage_bytes >= super::GC_THRESHOLD_BYTES {
             self.collect_garbage();
         } else {
             self.qsbr.quiesce();
@@ -405,6 +410,7 @@ impl Executor<'_> {
         for record_ptr in self.garbage_records.drain(..) {
             let _ = unsafe { Shared::into_box(record_ptr) };
         }
+        self.garbage_bytes = 0;
     }
 }
 
