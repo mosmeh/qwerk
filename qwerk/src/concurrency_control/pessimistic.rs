@@ -93,7 +93,7 @@ impl TransactionExecutor for Executor<'_> {
         let (item, value) = match self.index.entry(key.to_vec().into()) {
             Entry::Occupied(entry) => {
                 let record_ptr = *entry.get();
-                let record = unsafe { &mut *record_ptr.as_ptr() };
+                let record = unsafe { record_ptr.as_ref() };
                 if !record.lock.try_lock_shared() {
                     return Err(Error::NotSerializable);
                 }
