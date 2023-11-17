@@ -19,7 +19,7 @@ use std::{
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[derive(Parser, Serialize)]
+#[derive(Debug, Parser, Serialize)]
 struct Cli {
     #[arg(long, default_value_t = 8)]
     threads: usize,
@@ -49,13 +49,13 @@ struct Cli {
     read_proportion: Option<f64>,
 }
 
-#[derive(Clone, Copy, ValueEnum, Serialize)]
+#[derive(Clone, Copy, Debug, ValueEnum, Serialize)]
 enum Protocol {
-    Optimistic,
     Pessimistic,
+    Optimistic,
 }
 
-#[derive(Clone, Copy, ValueEnum, Serialize)]
+#[derive(Clone, Copy, Debug, ValueEnum, Serialize)]
 enum WorkloadKind {
     A,
     B,
@@ -107,7 +107,6 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
         }
     };
 
-    let db: Database<C> = Database::new();
     struct State<C: ConcurrencyControl> {
         db: Database<C>,
         barrier: Barrier,
@@ -115,38 +114,11 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
         latest: AtomicU64,
     }
     let state = Arc::new(State {
-        db,
+        db: Database::<C>::new(),
         barrier: Barrier::new(cli.threads + 1),
         is_running: true.into(),
         latest: cli.records.into(),
     });
-
-    let num_threads = match std::thread::available_parallelism() {
-        Ok(n) => n.get(),
-        Err(_) => 1,
-    };
-    eprintln!("Populating keys");
-    let threads: Vec<_> = (0..num_threads)
-        .map(|thread_index| {
-            let state = state.clone();
-            let from = cli.records * thread_index as u64 / num_threads as u64;
-            let to = cli.records * (thread_index as u64 + 1) / num_threads as u64;
-            let payload = vec![0; cli.payload];
-            std::thread::spawn(move || {
-                let mut buf = itoa::Buffer::new();
-                let mut worker = state.db.spawn_worker();
-                let mut txn = worker.begin_transaction();
-                for i in from..to {
-                    let key = buf.format(i);
-                    txn.insert(key, &payload).unwrap();
-                }
-                txn.commit().unwrap();
-            })
-        })
-        .collect();
-    for thread in threads {
-        thread.join().unwrap();
-    }
 
     #[derive(Default)]
     struct Statistics {
@@ -163,51 +135,59 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
         core_ids
     };
 
-    eprintln!("Spawning worker threads");
-    let clients: Vec<_> = (0..cli.threads)
-        .map(|#[allow(unused)] i| {
+    let threads: Vec<_> = (0..cli.threads)
+        .map(|thread_index| {
             #[cfg(feature = "affinity")]
-            let core_id = core_ids[i];
+            let core_id = core_ids[thread_index];
             let state = state.clone();
             std::thread::spawn(move || {
                 #[cfg(feature = "affinity")]
                 assert!(core_affinity::set_for_current(core_id));
+                let state = state.clone();
+                let from = cli.records * thread_index as u64 / cli.threads as u64;
+                let to = cli.records * (thread_index as u64 + 1) / cli.threads as u64;
                 let mut worker = state.db.spawn_worker();
                 let mut rng = rand::rngs::SmallRng::from_entropy();
-                let mut generator =
-                    NumberGenerator::new(&mut rng, &state.latest, cli.records, cli.theta);
+                let has_insert = workload.insert_proportion > 0;
+                let mut generator = NumberGenerator::new(
+                    &mut rng,
+                    &state.latest,
+                    cli.records,
+                    cli.theta,
+                    has_insert,
+                );
                 let mut stats = Statistics::default();
-                let mut keys = Vec::with_capacity(cli.working_set);
                 let payload = vec![0; cli.payload];
-                let op_weights = &[
+                let op_weights = [
                     workload.read_proportion,
                     workload.update_proportion,
                     workload.insert_proportion,
                     workload.rmw_proportion,
                 ];
                 let op_dist = WeightedIndex::new(op_weights).unwrap();
-                let has_insert = workload.insert_proportion > 0;
                 let mut buf = itoa::Buffer::new();
+                for i in from..to {
+                    let key = buf.format(i);
+                    let mut txn = worker.begin_transaction();
+                    txn.insert(key, &payload).unwrap();
+                    txn.commit().unwrap();
+                }
 
                 state.barrier.wait();
                 while state.is_running.load(Ordering::SeqCst) {
                     let op = OPERATIONS[op_dist.sample(&mut rng)];
+                    let mut txn = worker.begin_transaction();
                     for _ in 0..cli.working_set {
                         let key = if op == Operation::Insert {
-                            state.latest.fetch_add(1, Ordering::SeqCst)
+                            generator.insert()
                         } else {
                             match workload.request_distribution {
                                 RequestDistribution::Uniform => generator.uniform(&mut rng),
-                                RequestDistribution::Zipfian => {
-                                    generator.next(&mut rng, has_insert)
-                                }
+                                RequestDistribution::Zipfian => generator.next(&mut rng),
                             }
                         };
-                        keys.push(buf.format(key).as_bytes().to_vec().into_boxed_slice());
-                    }
+                        let key = buf.format(key);
 
-                    let mut txn = worker.begin_transaction();
-                    for key in &keys {
                         use std::hint::black_box;
                         match op {
                             Operation::Read => {
@@ -231,7 +211,6 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
                         Ok(()) => stats.num_commits += 1,
                         Err(_) => stats.num_aborts += 1,
                     }
-                    keys.clear();
                 }
                 stats
             })
@@ -246,25 +225,21 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
     state.is_running.store(false, Ordering::SeqCst);
     let elapsed = start.elapsed();
 
+    eprintln!("Finished");
+
     let mut stats = Statistics::default();
-    for client in clients {
-        let s = client.join().unwrap();
-        stats.num_commits += s.num_commits;
-        stats.num_aborts += s.num_aborts;
+    for thread in threads {
+        let stat = thread.join().unwrap();
+        stats.num_commits += stat.num_commits;
+        stats.num_aborts += stat.num_aborts;
     }
 
-    eprintln!("Finished");
-    eprintln!("Elapsed\t{:.3?}", elapsed);
-    eprintln!("Commits\t{}", stats.num_commits);
-    eprintln!("Aborts\t{}", stats.num_aborts);
     let abort_rate = stats.num_aborts as f64 / (stats.num_commits + stats.num_aborts) as f64;
-    eprintln!("Abort rate\t{:.3}", abort_rate);
     let tps = (stats.num_commits as f64 / elapsed.as_secs_f64()) as u64;
-    eprintln!("TPS\t{}", tps);
 
-    #[derive(Serialize)]
+    #[derive(Debug, Serialize)]
     struct Summary {
-        etime: u64,
+        elapsed: u128,
         commits: u64,
         aborts: u64,
         tps: u64,
@@ -272,18 +247,19 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
         #[serde(flatten)]
         args: Cli,
     }
+    let summary = Summary {
+        elapsed: elapsed.as_millis(),
+        commits: stats.num_commits,
+        aborts: stats.num_aborts,
+        tps,
+        abort_rate,
+        args: cli,
+    };
+
+    eprintln!("{:#?}", summary);
+
     let mut stdout = std::io::stdout().lock();
-    serde_json::ser::to_writer_pretty(
-        &mut stdout,
-        &Summary {
-            etime: elapsed.as_millis() as u64,
-            commits: stats.num_commits,
-            aborts: stats.num_aborts,
-            tps,
-            abort_rate,
-            args: cli,
-        },
-    )?;
+    serde_json::ser::to_writer_pretty(&mut stdout, &summary)?;
     stdout.write_all(b"\n")?;
     Ok(())
 }
@@ -297,11 +273,18 @@ struct NumberGenerator<'a> {
     zeta2theta: f64,
     zeta_n: f64,
     eta: f64,
+    has_insert: bool,
     latest: &'a AtomicU64,
 }
 
 impl<'a> NumberGenerator<'a> {
-    fn new<R: Rng>(rng: &mut R, latest: &'a AtomicU64, record_count: u64, theta: f64) -> Self {
+    fn new<R: Rng>(
+        rng: &mut R,
+        latest: &'a AtomicU64,
+        record_count: u64,
+        theta: f64,
+        has_insert: bool,
+    ) -> Self {
         let max = record_count - 1;
         let zeta2theta = (0..2).map(|i| 1.0 / f64::powf((i + 1) as f64, theta)).sum();
         let mut this = Self {
@@ -313,26 +296,31 @@ impl<'a> NumberGenerator<'a> {
             zeta2theta,
             eta: (1.0 - f64::powf(2.0 / max as f64, 1.0 - theta)) / (1.0 - zeta2theta / 0.0),
             zeta_n: 0.0,
+            has_insert,
             latest,
         };
-        this.next(rng, false);
+        this.next_inner(rng, max);
         this
+    }
+
+    fn insert(&mut self) -> u64 {
+        self.latest.fetch_add(1, Ordering::SeqCst)
     }
 
     fn uniform<R: Rng>(&mut self, rng: &mut R) -> u64 {
         self.uniform.sample(rng)
     }
 
-    fn next<R: Rng>(&mut self, rng: &mut R, is_insert: bool) -> u64 {
-        let max = if is_insert {
+    fn next<R: Rng>(&mut self, rng: &mut R) -> u64 {
+        let max = if self.has_insert {
             self.latest.load(Ordering::Relaxed)
         } else {
             self.max
         };
-        self.next_(rng, max)
+        self.next_inner(rng, max)
     }
 
-    fn next_<R: Rng>(&mut self, rng: &mut R, max: u64) -> u64 {
+    fn next_inner<R: Rng>(&mut self, rng: &mut R, max: u64) -> u64 {
         if max != self.count_for_zeta {
             self.zeta_n = if max > self.count_for_zeta {
                 self.zeta(self.count_for_zeta, max, self.zeta_n)
@@ -352,7 +340,7 @@ impl<'a> NumberGenerator<'a> {
         if uz < 1.0 + f64::powf(0.5, self.theta) {
             return 1;
         }
-        (max as f64 * f64::powf(self.eta.mul_add(u, 1.0) - self.eta, self.alpha)) as u64
+        (max as f64 * f64::powf(self.eta.mul_add(u, 1.0 - self.eta), self.alpha)) as u64
     }
 
     fn zeta(&mut self, st: u64, n: u64, initial_sum: f64) -> f64 {

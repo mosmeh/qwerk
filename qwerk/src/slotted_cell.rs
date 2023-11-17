@@ -61,7 +61,10 @@ impl<T: Default> SlottedCell<T> {
 
             for entry_index in 0..bucket_len {
                 let entry = unsafe { &*entries.add(entry_index) };
-                if !entry.is_present.fetch_or(true, SeqCst) {
+                let result = entry
+                    .is_present
+                    .compare_exchange(false, true, SeqCst, SeqCst);
+                if result.is_ok() {
                     return Slot { entry };
                 }
             }

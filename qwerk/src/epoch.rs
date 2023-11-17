@@ -25,19 +25,22 @@ impl EpochFramework {
         });
         let epoch_bumper = {
             let state = state.clone();
-            std::thread::spawn(move || {
-                let mut global_epoch = INITIAL_EPOCH;
-                while state.is_running.load(SeqCst) {
-                    for local_epoch in state.local_epochs.iter() {
-                        let backoff = Backoff::new();
-                        while local_epoch.load(SeqCst) < global_epoch {
-                            backoff.snooze();
+            std::thread::Builder::new()
+                .name("epoch_bumper".into())
+                .spawn(move || {
+                    let mut global_epoch = INITIAL_EPOCH;
+                    while state.is_running.load(SeqCst) {
+                        for local_epoch in state.local_epochs.iter() {
+                            let backoff = Backoff::new();
+                            while local_epoch.load(SeqCst) < global_epoch {
+                                backoff.snooze();
+                            }
                         }
+                        global_epoch = state.global_epoch.fetch_add(1, SeqCst) + 1;
+                        std::thread::sleep(epoch_duration);
                     }
-                    global_epoch = state.global_epoch.fetch_add(1, SeqCst) + 1;
-                    std::thread::sleep(epoch_duration);
-                }
-            })
+                })
+                .unwrap()
         };
         Self {
             state,
