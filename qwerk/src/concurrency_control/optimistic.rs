@@ -21,6 +21,7 @@ const EPOCH_POS: u64 = 32;
 const SEQUENCE_POS: u64 = 2;
 const ABSENT: u64 = 0x2;
 const LOCKED: u64 = 0x1;
+const FLAGS: u64 = ABSENT | LOCKED;
 
 /// Optimistic concurrency control.
 ///
@@ -77,21 +78,10 @@ impl Drop for Record {
     }
 }
 
-impl Clone for Record {
-    fn clone(&self) -> Self {
-        let RecordSnapshot { buf_ptr, len, tid } = self.read();
-        Self {
-            buf_ptr: buf_ptr.into(),
-            len: len.into(),
-            tid: tid.into(),
-        }
-    }
-}
-
 impl Record {
     /// Locks the record if it is present.
     ///
-    /// Returns the current TID.
+    /// Returns the TID before the locking operation.
     fn lock_if_present(&self) -> u64 {
         let backoff = Backoff::new();
         loop {
@@ -304,12 +294,12 @@ impl TransactionExecutor for Executor<'_> {
                 // another transaction
                 return Err(Error::NotSerializable);
             }
-            assert!(item.tid & ABSENT == 0);
+            assert!(tid & ABSENT == 0);
 
             // new TID should be
             // (a) larger than the TID of any record read or written
             //     by the transaction
-            max_tid = max_tid.max(item.tid & !LOCKED);
+            max_tid = max_tid.max(tid & !FLAGS);
         }
 
         // new TID should be
@@ -322,7 +312,7 @@ impl TransactionExecutor for Executor<'_> {
             current_epoch << EPOCH_POS
         };
         new_tid += 1 << SEQUENCE_POS;
-        assert!(new_tid & LOCKED == 0);
+        assert!(new_tid & FLAGS == 0);
         self.max_tid = new_tid;
 
         // Phase 3
