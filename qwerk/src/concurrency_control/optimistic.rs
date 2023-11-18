@@ -24,7 +24,7 @@ const LOCKED: u64 = 0x1;
 
 /// Optimistic concurrency control.
 ///
-/// This is an implementation of Silo.
+/// This is an implementation of [Silo](https://doi.org/10.1145/2517349.2522713).
 pub struct Optimistic {
     epoch_fw: EpochFramework,
     qsbr: Qsbr,
