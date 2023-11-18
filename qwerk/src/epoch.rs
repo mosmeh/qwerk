@@ -9,6 +9,11 @@ use std::{
     time::Duration,
 };
 
+// Epoch framework is described in:
+// Tu et al. 2013. Speedy transactions in multicore in-memory databases. https://doi.org/10.1145/2517349.2522713
+// Chandramouli et al. 2018. FASTER: A Concurrent Key-Value Store with In-Place Updates. https://doi.org/10.1145/3183713.3196898
+// Li et al. 2022. Performant Almost-Latch-Free Data Structures Using Epoch Protection. https://doi.org/10.1145/3533737.3535091
+
 pub struct EpochFramework {
     state: Arc<State>,
     epoch_bumper: Option<JoinHandle<()>>,
