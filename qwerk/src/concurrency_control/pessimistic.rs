@@ -33,7 +33,8 @@ impl ConcurrencyControlInternal for Pessimistic {
     ) -> Self::Executor<'a> {
         Self::Executor {
             index,
-            qsbr: self.qsbr.acquire(),
+            qsbr: &self.qsbr,
+            qsbr_guard: self.qsbr.acquire(),
             garbage_records: Default::default(),
             working_set: Default::default(),
         }
@@ -67,9 +68,10 @@ impl Record {
 pub struct Executor<'a> {
     // global state
     index: &'a HashIndex<Box<[u8]>, Shared<Record>>,
+    qsbr: &'a Qsbr,
 
     // per-executor state
-    qsbr: QsbrGuard<'a>,
+    qsbr_guard: QsbrGuard<'a>,
     garbage_records: Vec<Shared<Record>>,
 
     // per-transaction state
@@ -79,6 +81,19 @@ pub struct Executor<'a> {
 impl TransactionExecutor for Executor<'_> {
     fn begin_transaction(&mut self) {
         self.working_set.clear();
+        self.qsbr_guard.quiesce();
+    }
+
+    fn end_transaction(&mut self) {
+        self.qsbr_guard.mark_as_offline();
+
+        let garbage_bytes = self
+            .garbage_records
+            .len()
+            .saturating_mul(std::mem::size_of::<Record>());
+        if garbage_bytes >= super::GC_THRESHOLD_BYTES {
+            self.collect_garbage();
+        }
     }
 
     fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>> {
@@ -195,7 +210,6 @@ impl TransactionExecutor for Executor<'_> {
                 ItemKind::Write { .. } => record.lock.unlock_exclusive(),
             }
         }
-        self.finish_txn();
         Ok(())
     }
 
@@ -220,23 +234,10 @@ impl TransactionExecutor for Executor<'_> {
                 }
             }
         }
-        self.finish_txn();
     }
 }
 
 impl Executor<'_> {
-    fn finish_txn(&mut self) {
-        let garbage_bytes = self
-            .garbage_records
-            .len()
-            .saturating_mul(std::mem::size_of::<Record>());
-        if garbage_bytes >= super::GC_THRESHOLD_BYTES {
-            self.collect_garbage();
-        } else {
-            self.qsbr.quiesce();
-        }
-    }
-
     fn collect_garbage(&mut self) {
         self.qsbr.sync();
         for record_ptr in self.garbage_records.drain(..) {

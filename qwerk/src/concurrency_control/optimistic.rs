@@ -50,12 +50,13 @@ impl ConcurrencyControlInternal for Optimistic {
     ) -> Self::Executor<'a> {
         Self::Executor {
             index,
+            qsbr: &self.qsbr,
             max_tid: 0,
             epoch_guard: self.epoch_fw.acquire(),
-            qsbr: self.qsbr.acquire(),
             garbage_bytes: 0,
             garbage_values: Default::default(),
             garbage_records: Default::default(),
+            qsbr_guard: self.qsbr.acquire(),
             read_set: Default::default(),
             write_set: Default::default(),
         }
@@ -146,16 +147,17 @@ struct RecordSnapshot {
 pub struct Executor<'a> {
     // global state
     index: &'a HashIndex<Box<[u8]>, Shared<Record>>,
+    qsbr: &'a Qsbr,
 
     // per-executor state
     max_tid: u64,
     epoch_guard: EpochGuard<'a>,
-    qsbr: QsbrGuard<'a>,
     garbage_bytes: usize,
     garbage_values: Vec<Box<[u8]>>,
     garbage_records: Vec<Shared<Record>>,
 
     // per-transaction state
+    qsbr_guard: QsbrGuard<'a>,
     read_set: Vec<ReadItem<'a>>,
     write_set: Vec<WriteItem>,
 }
@@ -164,6 +166,14 @@ impl TransactionExecutor for Executor<'_> {
     fn begin_transaction(&mut self) {
         self.read_set.clear();
         self.write_set.clear();
+        self.qsbr_guard.quiesce();
+    }
+
+    fn end_transaction(&mut self) {
+        self.qsbr_guard.mark_as_offline();
+        if self.garbage_bytes >= super::GC_THRESHOLD_BYTES {
+            self.collect_garbage();
+        }
     }
 
     fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>> {
@@ -353,7 +363,6 @@ impl TransactionExecutor for Executor<'_> {
             }
         }
 
-        self.finish_txn();
         Ok(())
     }
 
@@ -380,20 +389,10 @@ impl TransactionExecutor for Executor<'_> {
                 self.garbage_bytes += std::mem::size_of::<Record>();
             }
         }
-
-        self.finish_txn();
     }
 }
 
 impl Executor<'_> {
-    fn finish_txn(&mut self) {
-        if self.garbage_bytes >= super::GC_THRESHOLD_BYTES {
-            self.collect_garbage();
-        } else {
-            self.qsbr.quiesce();
-        }
-    }
-
     fn collect_garbage(&mut self) {
         self.qsbr.sync();
         self.garbage_values.clear();
