@@ -28,7 +28,9 @@ pub trait ConcurrencyControlInternal: Send + Sync + 'static {
 }
 
 pub trait TransactionExecutor {
-    fn begin_transaction(&mut self);
+    fn begin_transaction(&mut self) {}
+    fn end_transaction(&mut self) {}
+
     fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>>;
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()>;
     fn commit(&mut self) -> Result<()>;

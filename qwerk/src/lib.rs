@@ -141,6 +141,7 @@ impl<C: ConcurrencyControl> Transaction<'_, '_, C> {
     /// [`get`]: #method.get
     pub fn commit(mut self) -> Result<()> {
         self.try_mutate(|executor| executor.commit())?;
+        self.worker.txn_executor.end_transaction();
         self.is_active = false;
         Ok(())
     }
@@ -170,8 +171,9 @@ impl<C: ConcurrencyControl> Transaction<'_, '_, C> {
         if !self.is_active {
             return;
         }
-        self.is_active = false;
         self.worker.txn_executor.abort();
+        self.worker.txn_executor.end_transaction();
+        self.is_active = false;
     }
 }
 

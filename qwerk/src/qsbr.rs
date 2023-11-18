@@ -21,8 +21,27 @@ impl Qsbr {
         guard.quiesce();
         guard
     }
+
+    /// Waits until all owners of [`QsbrGuard`]s `acquire`d from this [`Qsbr`]
+    /// experience quiescent states at least once.
+    ///
+    /// Returns a lower bound of the counter value seen by all [`QsbrGuard`]s.
+    pub fn sync(&self) -> u64 {
+        let counter = self.global_counter.fetch_add(1, SeqCst) + 1;
+        for local_counter in self.local_counters.iter() {
+            let backoff = Backoff::new();
+            while local_counter.load(SeqCst) < counter {
+                backoff.snooze();
+            }
+        }
+        counter
+    }
 }
 
+/// A representation of a participant of QSBR.
+///
+/// While this guard is alive, the owner of this guard has to periodically
+/// declare that it is on a quiescent state by calling [`quiesce`].
 pub struct QsbrGuard<'a> {
     qsbr: &'a Qsbr,
     local_counter: Slot<'a, CachePadded<AtomicU64>>,
@@ -38,29 +57,17 @@ impl QsbrGuard<'_> {
         counter
     }
 
-    /// Waits until all owners of guards `acquire`d from the same [`Qsbr`]
-    /// experience quiescent states at least once.
+    /// Temporarily marks the owner of this guard as not participating in QSBR.
     ///
-    /// Returns a lower bound of the counter value seen by all [`QsbrGuard`]s
-    /// for the same [`Qsbr`].
-    pub fn sync(&self) -> u64 {
-        let counter = self.qsbr.global_counter.fetch_add(1, SeqCst) + 1;
-        self.local_counter.store(counter, SeqCst);
-
-        for local_counter in self.qsbr.local_counters.iter() {
-            let backoff = Backoff::new();
-            while local_counter.load(SeqCst) < counter {
-                self.quiesce();
-                backoff.snooze();
-            }
-        }
-
-        counter
+    /// Until the next call to [`quiesce`], the owner of this guard is not
+    /// considered as a participant of QSBR.
+    pub fn mark_as_offline(&self) {
+        self.local_counter.store(u64::MAX, SeqCst);
     }
 }
 
 impl Drop for QsbrGuard<'_> {
     fn drop(&mut self) {
-        self.local_counter.store(u64::MAX, SeqCst);
+        self.mark_as_offline()
     }
 }
