@@ -225,11 +225,10 @@ fn run_worker<C: ConcurrencyControl>(
     let mut stats = Statistics::default();
     let payload = vec![0; cli.payload];
     let op_dist = WeightedIndex::new(op_weights).unwrap();
-    let mut buf = itoa::Buffer::new();
     let from = cli.records * thread_index as u64 / cli.threads as u64;
     let to = cli.records * (thread_index as u64 + 1) / cli.threads as u64;
     for i in from..to {
-        let key = buf.format(i);
+        let key = i.to_ne_bytes();
         let mut txn = worker.begin_transaction();
         txn.insert(key, &payload).unwrap();
         txn.commit().unwrap();
@@ -240,12 +239,12 @@ fn run_worker<C: ConcurrencyControl>(
         let op = OPERATIONS[op_dist.sample(&mut rng)];
         let mut txn = worker.begin_transaction();
         for _ in 0..cli.working_set {
-            let key = if op == Operation::Insert {
+            let i = if op == Operation::Insert {
                 generator.insert()
             } else {
                 generator.zipfian(&mut rng)
             };
-            let key = buf.format(key);
+            let key = i.to_ne_bytes();
 
             use std::hint::black_box;
             match op {
