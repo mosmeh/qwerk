@@ -7,7 +7,6 @@ edition = "2021"
 anyhow = "1.0.75"
 clap = { version = "4.4.8", features = ["derive"] }
 core_affinity = { version = "0.8.1", optional = true }
-itoa = "1.0.9"
 qwerk = { path = "../qwerk" }
 rand = { version = "0.8.5", features = [
 	"std",
