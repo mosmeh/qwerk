@@ -87,10 +87,10 @@ impl Record {
         let backoff = Backoff::new();
         loop {
             let current_tid = self.tid.load(SeqCst);
-            if current_tid & ABSENT > 0 {
+            if current_tid & ABSENT != 0 {
                 return current_tid;
             }
-            if current_tid & LOCKED > 0 {
+            if current_tid & LOCKED != 0 {
                 backoff.snooze();
                 continue;
             }
@@ -110,14 +110,14 @@ impl Record {
         let backoff = Backoff::new();
         loop {
             let tid1 = self.tid.load(SeqCst);
-            if tid1 & ABSENT > 0 {
+            if tid1 & ABSENT != 0 {
                 return RecordSnapshot {
                     buf_ptr: std::ptr::null_mut(),
                     len: 0,
                     tid: tid1,
                 };
             }
-            if tid1 & LOCKED > 0 {
+            if tid1 & LOCKED != 0 {
                 backoff.snooze();
                 continue;
             }
@@ -274,7 +274,7 @@ impl TransactionExecutor for Executor<'_> {
             };
             if was_occupied {
                 let tid = unsafe { record_ptr.as_ref() }.lock_if_present();
-                if tid & ABSENT > 0 {
+                if tid & ABSENT != 0 {
                     // the record was removed by another transaction
                     return Err(Error::NotSerializable);
                 }
