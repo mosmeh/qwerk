@@ -119,6 +119,9 @@ impl<C: ConcurrencyControl> Transaction<'_, '_, C> {
         }
     }
 
+    /// Inserts a key-value pair into the database.
+    ///
+    /// If the key already exists, the value is overwritten.
     pub fn insert<K, V>(&mut self, key: K, value: V) -> Result<()>
     where
         K: AsRef<[u8]>,

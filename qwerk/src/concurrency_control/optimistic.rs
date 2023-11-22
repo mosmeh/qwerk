@@ -292,27 +292,41 @@ impl TransactionExecutor for Executor<'_> {
         // serialization point
         let current_epoch = self.epoch_guard.refresh();
 
-        // Phase 2
+        // Phase 2: validation phase
         for item in &self.read_set {
-            let tid = item
-                .record_ptr
-                .or_else(|| self.index.peek_with(&item.key, |_, value| *value))
-                .map(|record_ptr| unsafe { record_ptr.as_ref() }.tid.load(SeqCst))
-                .unwrap_or(0);
+            let record_ptr = match item.record_ptr {
+                Some(record_ptr) => record_ptr,
+                None if item.tid & LOCKED != 0 => {
+                    // This item is also in the write set.
+                    self.index
+                        .peek_with(&item.key, |_, value| *value)
+                        .expect("the key must have been ensured to exist in Phase 1")
+                }
+                None => {
+                    // This item is not in the write set.
+                    if self.index.contains(&item.key) {
+                        // The record was inserted by another transaction.
+                        return Err(Error::NotSerializable);
+                    }
+                    continue;
+                }
+            };
+
+            let tid = unsafe { record_ptr.as_ref() }.tid.load(SeqCst);
             if tid != item.tid {
-                // the TID doesn't match or the record is locked by
-                // another transaction
+                // The TID doesn't match or the record is locked by
+                // another transaction.
                 return Err(Error::NotSerializable);
             }
             assert!(tid & ABSENT == 0);
 
-            // new TID should be
+            // New TID should be
             // (a) larger than the TID of any record read or written
             //     by the transaction
             max_tid = max_tid.max(tid & !FLAGS);
         }
 
-        // new TID should be
+        // New TID should be
         // (c) in the current global epoch
         let epoch_of_max_tid = (max_tid >> EPOCH_SHIFT) as u32;
         assert!(epoch_of_max_tid <= current_epoch);
@@ -325,7 +339,7 @@ impl TransactionExecutor for Executor<'_> {
         assert!(new_tid & FLAGS == 0);
         self.max_tid = new_tid;
 
-        // Phase 3
+        // Phase 3: write phase
         for item in self.write_set.drain(..) {
             let record_ptr = *item.record_ptr.get().unwrap();
             let record = unsafe { record_ptr.as_ref() };
