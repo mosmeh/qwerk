@@ -17,8 +17,8 @@ use std::{
 // bit [1]     - absent
 // bit [0]     - locked
 
-const EPOCH_POS: u64 = 32;
-const SEQUENCE_POS: u64 = 2;
+const EPOCH_SHIFT: u64 = 32;
+const SEQUENCE_SHIFT: u64 = 2;
 const ABSENT: u64 = 0x2;
 const LOCKED: u64 = 0x1;
 const FLAGS: u64 = ABSENT | LOCKED;
@@ -314,14 +314,14 @@ impl TransactionExecutor for Executor<'_> {
 
         // new TID should be
         // (c) in the current global epoch
-        let epoch_of_max_tid = max_tid >> EPOCH_POS;
+        let epoch_of_max_tid = (max_tid >> EPOCH_SHIFT) as u32;
         assert!(epoch_of_max_tid <= current_epoch);
         let mut new_tid = if epoch_of_max_tid == current_epoch {
             max_tid
         } else {
-            current_epoch << EPOCH_POS
+            (current_epoch as u64) << EPOCH_SHIFT
         };
-        new_tid += 1 << SEQUENCE_POS;
+        new_tid += 1 << SEQUENCE_SHIFT;
         assert!(new_tid & FLAGS == 0);
         self.max_tid = new_tid;
 

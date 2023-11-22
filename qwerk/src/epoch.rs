@@ -2,7 +2,7 @@ use crate::slotted_cell::{Slot, SlottedCell};
 use crossbeam_utils::{Backoff, CachePadded};
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering::SeqCst},
+        atomic::{AtomicBool, AtomicU32, Ordering::SeqCst},
         Arc,
     },
     thread::JoinHandle,
@@ -21,8 +21,8 @@ pub struct EpochFramework {
 
 impl EpochFramework {
     pub fn with_epoch_duration(epoch_duration: Duration) -> Self {
-        // >= 2 to avoid overflow in EpochGuard::reclamation_epoch()
-        const INITIAL_EPOCH: u64 = 2;
+        // >= 2 to make sure (reclamation epoch) = epoch - 2 >= 0
+        const INITIAL_EPOCH: u32 = 2;
         let state = Arc::new(State {
             global_epoch: INITIAL_EPOCH.into(),
             local_epochs: Default::default(),
@@ -77,21 +77,21 @@ impl Drop for EpochFramework {
 }
 
 struct State {
-    global_epoch: AtomicU64,
-    local_epochs: SlottedCell<CachePadded<AtomicU64>>,
+    global_epoch: AtomicU32,
+    local_epochs: SlottedCell<CachePadded<AtomicU32>>,
     is_running: AtomicBool,
 }
 
 pub struct EpochGuard<'a> {
-    global_epoch: &'a AtomicU64,
-    local_epoch: Slot<'a, CachePadded<AtomicU64>>,
+    global_epoch: &'a AtomicU32,
+    local_epoch: Slot<'a, CachePadded<AtomicU32>>,
 }
 
 impl EpochGuard<'_> {
     /// Takes a snapshot of the current global epoch.
     ///
     /// Returns the current global epoch.
-    pub fn refresh(&self) -> u64 {
+    pub fn refresh(&self) -> u32 {
         let epoch = self.global_epoch.load(SeqCst);
         self.local_epoch.store(epoch, SeqCst);
         epoch
@@ -100,6 +100,6 @@ impl EpochGuard<'_> {
 
 impl Drop for EpochGuard<'_> {
     fn drop(&mut self) {
-        self.local_epoch.store(u64::MAX, SeqCst);
+        self.local_epoch.store(u32::MAX, SeqCst);
     }
 }
