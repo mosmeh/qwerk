@@ -292,24 +292,36 @@ impl TransactionExecutor for Executor<'_> {
         // serialization point
         let current_epoch = self.epoch_guard.refresh();
 
-        // Phase 2
+        // Phase 2: validation phase
         for item in &self.read_set {
-            let tid = item
-                .record_ptr
-                .or_else(|| self.index.peek_with(&item.key, |_, value| *value))
-                .map(|record_ptr| unsafe { record_ptr.as_ref() }.tid.load(SeqCst))
-                .unwrap_or(0);
-            if tid != item.tid {
-                // the TID doesn't match or the record is locked by
-                // another transaction
-                return Err(Error::NotSerializable);
-            }
-            assert!(tid & ABSENT == 0);
+            match item.record_ptr {
+                Some(record_ptr) => {
+                    let tid = unsafe { record_ptr.as_ref() }.tid.load(SeqCst);
+                    if tid != item.tid {
+                        // the TID doesn't match or the record is locked by
+                        // another transaction
+                        return Err(Error::NotSerializable);
+                    }
+                    assert!(tid & ABSENT == 0);
 
-            // new TID should be
-            // (a) larger than the TID of any record read or written
-            //     by the transaction
-            max_tid = max_tid.max(tid & !FLAGS);
+                    // new TID should be
+                    // (a) larger than the TID of any record read or written
+                    //     by the transaction
+                    max_tid = max_tid.max(tid & !FLAGS);
+                }
+                None if item.tid & LOCKED != 0 => {
+                    // This item is also in the write set.
+                    // This transaction must have inserted the record in Phase 1.
+                }
+                None => {
+                    // This item is not in the write set.
+
+                    if self.index.contains(&item.key) {
+                        // the record was inserted by another transaction
+                        return Err(Error::NotSerializable);
+                    }
+                }
+            }
         }
 
         // new TID should be
@@ -325,7 +337,7 @@ impl TransactionExecutor for Executor<'_> {
         assert!(new_tid & FLAGS == 0);
         self.max_tid = new_tid;
 
-        // Phase 3
+        // Phase 3: write phase
         for item in self.write_set.drain(..) {
             let record_ptr = *item.record_ptr.get().unwrap();
             let record = unsafe { record_ptr.as_ref() };
