@@ -15,7 +15,7 @@ use std::{
 // Li et al. 2022. Performant Almost-Latch-Free Data Structures Using Epoch Protection. https://doi.org/10.1145/3533737.3535091
 
 pub struct EpochFramework {
-    state: Arc<State>,
+    shared: Arc<SharedState>,
     epoch_bumper: Option<JoinHandle<()>>,
 }
 
@@ -23,40 +23,40 @@ impl EpochFramework {
     pub fn with_epoch_duration(epoch_duration: Duration) -> Self {
         // >= 2 to make sure (reclamation epoch) = epoch - 2 >= 0
         const INITIAL_EPOCH: u32 = 2;
-        let state = Arc::new(State {
+        let shared = Arc::new(SharedState {
             global_epoch: INITIAL_EPOCH.into(),
             local_epochs: Default::default(),
             is_running: true.into(),
         });
         let epoch_bumper = {
-            let state = state.clone();
+            let shared = shared.clone();
             std::thread::Builder::new()
                 .name("epoch_bumper".into())
                 .spawn(move || {
                     let mut global_epoch = INITIAL_EPOCH;
-                    while state.is_running.load(SeqCst) {
-                        for local_epoch in state.local_epochs.iter() {
+                    while shared.is_running.load(SeqCst) {
+                        for local_epoch in shared.local_epochs.iter() {
                             let backoff = Backoff::new();
                             while local_epoch.load(SeqCst) < global_epoch {
                                 backoff.snooze();
                             }
                         }
-                        global_epoch = state.global_epoch.fetch_add(1, SeqCst) + 1;
+                        global_epoch = shared.global_epoch.fetch_add(1, SeqCst) + 1;
                         std::thread::sleep(epoch_duration);
                     }
                 })
                 .unwrap()
         };
         Self {
-            state,
+            shared,
             epoch_bumper: Some(epoch_bumper),
         }
     }
 
     pub fn acquire(&self) -> EpochGuard {
         let guard = EpochGuard {
-            global_epoch: &self.state.global_epoch,
-            local_epoch: self.state.local_epochs.alloc_slot(),
+            global_epoch: &self.shared.global_epoch,
+            local_epoch: self.shared.local_epochs.alloc_slot(),
         };
         guard.refresh();
         guard
@@ -71,12 +71,12 @@ impl Default for EpochFramework {
 
 impl Drop for EpochFramework {
     fn drop(&mut self) {
-        self.state.is_running.store(false, SeqCst);
+        self.shared.is_running.store(false, SeqCst);
         let _ = std::mem::take(&mut self.epoch_bumper).unwrap().join();
     }
 }
 
-struct State {
+struct SharedState {
     global_epoch: AtomicU32,
     local_epochs: SlottedCell<CachePadded<AtomicU32>>,
     is_running: AtomicBool,

@@ -116,7 +116,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
         }
     };
 
-    let state = Arc::new(State {
+    let shared = Arc::new(SharedState {
         db: Database::<C>::new(),
         barrier: Barrier::new(cli.threads + 1),
         is_running: true.into(),
@@ -136,34 +136,34 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
         core_ids
     };
 
-    let threads: Vec<_> = (0..cli.threads)
-        .map(|thread_index| {
+    let workers: Vec<_> = (0..cli.threads)
+        .map(|worker_index| {
             #[cfg(feature = "affinity")]
-            let core_id = core_ids[thread_index];
-            let state = state.clone();
+            let core_id = core_ids[worker_index];
+            let shared = shared.clone();
             let cli = cli.clone();
             let workload = workload.clone();
             std::thread::spawn(move || -> anyhow::Result<_> {
                 #[cfg(feature = "affinity")]
                 anyhow::ensure!(core_affinity::set_for_current(core_id));
-                Ok(run_worker(cli, workload, &state, thread_index))
+                Ok(run_worker(cli, workload, &shared, worker_index))
             })
         })
         .collect();
 
     eprintln!("Start");
-    state.barrier.wait();
+    shared.barrier.wait();
 
     let start = Instant::now();
     std::thread::sleep(Duration::from_millis(cli.duration));
-    state.is_running.store(false, Ordering::SeqCst);
+    shared.is_running.store(false, Ordering::SeqCst);
     let elapsed = start.elapsed();
 
     eprintln!("Finished");
 
     let mut stats = Statistics::default();
-    for thread in threads {
-        stats += thread.join().unwrap()?;
+    for worker in workers {
+        stats += worker.join().unwrap()?;
     }
 
     let tps = (stats.num_commits as f64 / elapsed.as_secs_f64()) as u64;
@@ -195,7 +195,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-struct State<C: ConcurrencyControl> {
+struct SharedState<C: ConcurrencyControl> {
     db: Database<C>,
     barrier: Barrier,
     is_running: AtomicBool,
@@ -205,12 +205,12 @@ struct State<C: ConcurrencyControl> {
 fn run_worker<C: ConcurrencyControl>(
     cli: Cli,
     workload: Workload,
-    state: &State<C>,
-    thread_index: usize,
+    shared: &SharedState<C>,
+    worker_index: usize,
 ) -> Statistics {
-    let mut worker = state.db.spawn_worker();
+    let mut worker = shared.db.spawn_worker();
     let mut rng = match cli.seed {
-        Some(seed) => SmallRng::seed_from_u64(seed ^ thread_index as u64),
+        Some(seed) => SmallRng::seed_from_u64(seed ^ worker_index as u64),
         None => SmallRng::from_entropy(),
     };
     let op_weights = [
@@ -221,12 +221,12 @@ fn run_worker<C: ConcurrencyControl>(
     ];
     let has_insert = workload.insert_proportion > 0;
     let mut generator =
-        KeyGenerator::new(&mut rng, &state.latest, cli.records, cli.theta, has_insert);
+        KeyGenerator::new(&mut rng, &shared.latest, cli.records, cli.theta, has_insert);
     let mut stats = Statistics::default();
     let payload = vec![0; cli.payload];
     let op_dist = WeightedIndex::new(op_weights).unwrap();
-    let from = cli.records * thread_index as u64 / cli.threads as u64;
-    let to = cli.records * (thread_index as u64 + 1) / cli.threads as u64;
+    let from = cli.records * worker_index as u64 / cli.threads as u64;
+    let to = cli.records * (worker_index as u64 + 1) / cli.threads as u64;
     for i in from..to {
         let key = i.to_ne_bytes();
         let mut txn = worker.begin_transaction();
@@ -234,8 +234,8 @@ fn run_worker<C: ConcurrencyControl>(
         txn.commit().unwrap();
     }
 
-    state.barrier.wait();
-    while state.is_running.load(Ordering::SeqCst) {
+    shared.barrier.wait();
+    while shared.is_running.load(Ordering::SeqCst) {
         let op = OPERATIONS[op_dist.sample(&mut rng)];
         let mut txn = worker.begin_transaction();
         for _ in 0..cli.working_set {
@@ -262,7 +262,7 @@ fn run_worker<C: ConcurrencyControl>(
             }
         }
         let result = txn.commit();
-        if !state.is_running.load(Ordering::Relaxed) {
+        if !shared.is_running.load(Ordering::Relaxed) {
             break;
         }
         match result {
