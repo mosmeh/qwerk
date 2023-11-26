@@ -145,18 +145,18 @@ struct RecordSnapshot {
 }
 
 pub struct Executor<'a> {
-    // global state
+    // Global state
     index: &'a HashIndex<Box<[u8]>, Shared<Record>>,
     qsbr: &'a Qsbr,
 
-    // per-executor state
+    // Per-executor state
     max_tid: u64,
     epoch_guard: EpochGuard<'a>,
     garbage_bytes: usize,
     garbage_values: Vec<Box<[u8]>>,
     garbage_records: Vec<Shared<Record>>,
 
-    // per-transaction state
+    // Per-transaction state
     qsbr_guard: QsbrGuard<'a>,
     read_set: Vec<ReadItem<'a>>,
     write_set: Vec<WriteItem>,
@@ -177,13 +177,13 @@ impl TransactionExecutor for Executor<'_> {
     }
 
     fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>> {
-        // ensures read-your-writes
+        // Ensures read-your-writes.
         let item = self.write_set.iter().find(|item| item.key.as_ref() == key);
         if let Some(item) = item {
             return Ok(item.value.as_deref());
         }
 
-        // ensures repeatable reads
+        // Ensures repeatable reads.
         let item = self.read_set.iter().find(|item| item.key.as_ref() == key);
         if let Some(item) = item {
             return Ok(item.value);
@@ -195,7 +195,7 @@ impl TransactionExecutor for Executor<'_> {
             Some(record_ptr) => {
                 let RecordSnapshot { buf_ptr, len, tid } = unsafe { record_ptr.as_ref() }.read();
                 if buf_ptr.is_null() {
-                    // the record was removed by another transaction
+                    // The record was removed by another transaction.
                     return Err(Error::NotSerializable);
                 }
                 ReadItem {
@@ -248,10 +248,10 @@ impl TransactionExecutor for Executor<'_> {
     fn commit(&mut self) -> Result<()> {
         // Phase 1
 
-        // the stability of the sort doesn't matter because the keys are unique
+        // The stability of the sort doesn't matter because the keys are unique.
         self.write_set.sort_unstable_by(|a, b| a.key.cmp(&b.key));
 
-        // new TID should be
+        // New TID should be
         // (b) larger than the worker’s most recently chosen TID
         let mut max_tid = self.max_tid;
 
@@ -275,11 +275,11 @@ impl TransactionExecutor for Executor<'_> {
             if was_occupied {
                 let tid = unsafe { record_ptr.as_ref() }.lock_if_present();
                 if tid & ABSENT != 0 {
-                    // the record was removed by another transaction
+                    // The record was removed by another transaction.
                     return Err(Error::NotSerializable);
                 }
 
-                // new TID should be
+                // New TID should be
                 // (a) larger than the TID of any record read or written
                 //     by the transaction
                 max_tid = max_tid.max(tid);
@@ -289,7 +289,7 @@ impl TransactionExecutor for Executor<'_> {
                 .unwrap_or_else(|_| panic!("record_ptr is already set"));
         }
 
-        // serialization point
+        // Serialization point
         let current_epoch = self.epoch_guard.refresh();
 
         // Phase 2: validation phase
@@ -341,7 +341,10 @@ impl TransactionExecutor for Executor<'_> {
 
         // Phase 3: write phase
         for item in self.write_set.drain(..) {
-            let record_ptr = *item.record_ptr.get().unwrap();
+            let record_ptr = *item
+                .record_ptr
+                .get()
+                .expect("record_ptr must have been set in Phase 1");
             let record = unsafe { record_ptr.as_ref() };
 
             let (new_buf_ptr, new_len) = match item.value {
@@ -362,7 +365,7 @@ impl TransactionExecutor for Executor<'_> {
                 new_record_tid |= ABSENT;
             }
 
-            // store new TID and unlock the record
+            // Store new TID and unlock the record.
             record.tid.store(new_record_tid, SeqCst);
 
             if !prev_buf_ptr.is_null() {

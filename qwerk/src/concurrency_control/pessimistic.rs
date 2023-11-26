@@ -66,15 +66,15 @@ impl Record {
 }
 
 pub struct Executor<'a> {
-    // global state
+    // Global state
     index: &'a HashIndex<Box<[u8]>, Shared<Record>>,
     qsbr: &'a Qsbr,
 
-    // per-executor state
+    // Per-executor state
     qsbr_guard: QsbrGuard<'a>,
     garbage_records: Vec<Shared<Record>>,
 
-    // per-transaction state
+    // Per-transaction state
     working_set: Vec<WorkingItem>,
 }
 
