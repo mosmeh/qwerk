@@ -294,37 +294,39 @@ impl TransactionExecutor for Executor<'_> {
 
         // Phase 2: validation phase
         for item in &self.read_set {
-            match item.record_ptr {
-                Some(record_ptr) => {
-                    let tid = unsafe { record_ptr.as_ref() }.tid.load(SeqCst);
-                    if tid != item.tid {
-                        // the TID doesn't match or the record is locked by
-                        // another transaction
-                        return Err(Error::NotSerializable);
-                    }
-                    assert!(tid & ABSENT == 0);
-
-                    // new TID should be
-                    // (a) larger than the TID of any record read or written
-                    //     by the transaction
-                    max_tid = max_tid.max(tid & !FLAGS);
-                }
+            let record_ptr = match item.record_ptr {
+                Some(record_ptr) => record_ptr,
                 None if item.tid & LOCKED != 0 => {
                     // This item is also in the write set.
-                    // This transaction must have inserted the record in Phase 1.
+                    self.index
+                        .peek_with(&item.key, |_, value| *value)
+                        .expect("the key must have been ensured to exist in Phase 1")
                 }
                 None => {
                     // This item is not in the write set.
-
                     if self.index.contains(&item.key) {
-                        // the record was inserted by another transaction
+                        // The record was inserted by another transaction.
                         return Err(Error::NotSerializable);
                     }
+                    continue;
                 }
+            };
+
+            let tid = unsafe { record_ptr.as_ref() }.tid.load(SeqCst);
+            if tid != item.tid {
+                // The TID doesn't match or the record is locked by
+                // another transaction.
+                return Err(Error::NotSerializable);
             }
+            assert!(tid & ABSENT == 0);
+
+            // New TID should be
+            // (a) larger than the TID of any record read or written
+            //     by the transaction
+            max_tid = max_tid.max(tid & !FLAGS);
         }
 
-        // new TID should be
+        // New TID should be
         // (c) in the current global epoch
         let epoch_of_max_tid = (max_tid >> EPOCH_SHIFT) as u32;
         assert!(epoch_of_max_tid <= current_epoch);
