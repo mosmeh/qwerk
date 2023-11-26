@@ -4,7 +4,11 @@ mod pessimistic;
 pub use optimistic::Optimistic;
 pub use pessimistic::Pessimistic;
 
-use crate::{Result, Shared};
+use crate::{
+    epoch::{Epoch, EpochGuard},
+    log::Logger,
+    Result, Shared,
+};
 use scc::HashIndex;
 
 const GC_THRESHOLD_BYTES: usize = 4096;
@@ -33,7 +37,7 @@ pub trait TransactionExecutor {
 
     fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>>;
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()>;
-    fn commit(&mut self) -> Result<()>;
+    fn commit(&mut self, epoch_guard: &EpochGuard, logger: &Logger) -> Result<Epoch>;
 
     /// Aborts the transaction.
     ///

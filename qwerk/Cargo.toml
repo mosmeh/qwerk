@@ -4,7 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+crossbeam-channel = "0.5.8"
+crossbeam-queue = "0.3.8"
 crossbeam-utils = "0.8.16"
 parking_lot = "0.12.1"
 scc = "2.0.4"
 thiserror = "1.0.50"
+
+[dev-dependencies]
+anyhow = "1.0.75"

@@ -1,6 +1,7 @@
 use super::{ConcurrencyControl, ConcurrencyControlInternal, Shared, TransactionExecutor};
 use crate::{
-    epoch::{EpochFramework, EpochGuard},
+    epoch::{Epoch, EpochGuard},
+    log::Logger,
     qsbr::{Qsbr, QsbrGuard},
     Error, Result,
 };
@@ -27,7 +28,6 @@ const FLAGS: u64 = ABSENT | LOCKED;
 ///
 /// This is an implementation of [Silo](https://doi.org/10.1145/2517349.2522713).
 pub struct Optimistic {
-    epoch_fw: EpochFramework,
     qsbr: Qsbr,
 }
 
@@ -39,7 +39,6 @@ impl ConcurrencyControlInternal for Optimistic {
 
     fn init() -> Self {
         Self {
-            epoch_fw: Default::default(),
             qsbr: Default::default(),
         }
     }
@@ -52,7 +51,6 @@ impl ConcurrencyControlInternal for Optimistic {
             index,
             qsbr: &self.qsbr,
             max_tid: 0,
-            epoch_guard: self.epoch_fw.acquire(),
             garbage_bytes: 0,
             garbage_values: Default::default(),
             garbage_records: Default::default(),
@@ -151,7 +149,6 @@ pub struct Executor<'a> {
 
     // Per-executor state
     max_tid: u64,
-    epoch_guard: EpochGuard<'a>,
     garbage_bytes: usize,
     garbage_values: Vec<Box<[u8]>>,
     garbage_records: Vec<Shared<Record>>,
@@ -245,7 +242,13 @@ impl TransactionExecutor for Executor<'_> {
         Ok(())
     }
 
-    fn commit(&mut self) -> Result<()> {
+    fn commit(&mut self, epoch_guard: &EpochGuard, logger: &Logger) -> Result<Epoch> {
+        let mut reserver = logger.reserver();
+        for item in &self.write_set {
+            reserver.reserve_write(&item.key, item.value.as_deref());
+        }
+        let reserved = reserver.finish();
+
         // Phase 1
 
         // The stability of the sort doesn't matter because the keys are unique.
@@ -290,7 +293,7 @@ impl TransactionExecutor for Executor<'_> {
         }
 
         // Serialization point
-        let current_epoch = self.epoch_guard.refresh();
+        let current_epoch = epoch_guard.refresh();
 
         // Phase 2: validation phase
         for item in &self.read_set {
@@ -328,19 +331,22 @@ impl TransactionExecutor for Executor<'_> {
 
         // New TID should be
         // (c) in the current global epoch
-        let epoch_of_max_tid = (max_tid >> EPOCH_SHIFT) as u32;
+        let epoch_of_max_tid = Epoch((max_tid >> EPOCH_SHIFT) as u32);
         assert!(epoch_of_max_tid <= current_epoch);
         let mut new_tid = if epoch_of_max_tid == current_epoch {
             max_tid
         } else {
-            (current_epoch as u64) << EPOCH_SHIFT
+            (current_epoch.0 as u64) << EPOCH_SHIFT
         };
         new_tid += 1 << SEQUENCE_SHIFT;
         assert!(new_tid & FLAGS == 0);
         self.max_tid = new_tid;
 
         // Phase 3: write phase
+        let mut entry = reserved.insert(current_epoch, new_tid);
         for item in self.write_set.drain(..) {
+            entry.write(item.key.as_ref(), item.value.as_deref());
+
             let record_ptr = *item
                 .record_ptr
                 .get()
@@ -380,7 +386,7 @@ impl TransactionExecutor for Executor<'_> {
             }
         }
 
-        Ok(())
+        Ok(current_epoch)
     }
 
     fn abort(&mut self) {

@@ -1,13 +1,17 @@
 mod concurrency_control;
 mod epoch;
 mod lock;
+mod log;
 mod qsbr;
 mod shared;
 mod slotted_cell;
 
 pub use concurrency_control::{ConcurrencyControl, Optimistic, Pessimistic};
+pub use epoch::Epoch;
 
 use concurrency_control::TransactionExecutor;
+use epoch::{EpochFramework, EpochGuard};
+use log::{LogSystem, Logger};
 use scc::HashIndex;
 use shared::Shared;
 
@@ -27,32 +31,43 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Database<C: ConcurrencyControl> {
     index: HashIndex<Box<[u8]>, Shared<C::Record>>,
     concurrency_control: C,
+    epoch_fw: EpochFramework,
+    log_system: LogSystem,
 }
 
-impl<C: ConcurrencyControl> Default for Database<C> {
-    fn default() -> Self {
-        Self {
+impl<C: ConcurrencyControl> Database<C> {
+    pub fn new() -> std::io::Result<Self> {
+        Ok(Self {
             index: Default::default(),
             concurrency_control: C::init(),
-        }
+            epoch_fw: Default::default(),
+            log_system: LogSystem::new()?,
+        })
     }
-}
 
-impl<C: ConcurrencyControl> Database<C> {
-    pub fn new() -> Self {
-        Default::default()
-    }
-}
-
-impl<C: ConcurrencyControl> Database<C> {
     /// Spawns a [`Worker`], which can be used to perform transactions.
     ///
     /// You usually should spawn one [`Worker`] per thread, and reuse the
     /// [`Worker`] for multiple transactions.
-    pub fn spawn_worker(&self) -> Worker<'_, C> {
+    pub fn spawn_worker(&self) -> Worker<C> {
         Worker {
             txn_executor: self.concurrency_control.spawn_executor(&self.index),
+            epoch_guard: self.epoch_fw.acquire(),
+            logger: self.log_system.spawn_logger(),
         }
+    }
+
+    /// Returns the current durable epoch.
+    ///
+    /// The durable epoch is the epoch up to which all changes made by
+    /// committed transactions are guaranteed to be durable.
+    pub fn durable_epoch(&self) -> Epoch {
+        self.log_system.durable_epoch()
+    }
+
+    /// Persists the changes made by all committed transactions to the disk.
+    pub fn flush(&self) -> std::io::Result<()> {
+        self.log_system.flush()
     }
 }
 
@@ -69,6 +84,8 @@ impl<C: ConcurrencyControl> Drop for Database<C> {
 
 pub struct Worker<'a, C: ConcurrencyControl + 'a> {
     txn_executor: C::Executor<'a>,
+    epoch_guard: EpochGuard<'a>,
+    logger: Logger<'a>,
 }
 
 impl<'db, C: ConcurrencyControl> Worker<'db, C> {
@@ -127,11 +144,15 @@ impl<C: ConcurrencyControl> Transaction<'_, '_, C> {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        self.try_mutate(|executor| executor.write(key.as_ref(), Some(value.as_ref())))
+        self.try_mutate(|worker| {
+            worker
+                .txn_executor
+                .write(key.as_ref(), Some(value.as_ref()))
+        })
     }
 
     pub fn remove<K: AsRef<[u8]>>(&mut self, key: K) -> Result<()> {
-        self.try_mutate(|executor| executor.write(key.as_ref(), None))
+        self.try_mutate(|worker| worker.txn_executor.write(key.as_ref(), None))
     }
 
     /// Commits the transaction.
@@ -141,12 +162,19 @@ impl<C: ConcurrencyControl> Transaction<'_, '_, C> {
     /// If the commit fails, [`get`] may have returned inconsistent values,
     /// so the values returned by [`get`] must be discarded.
     ///
+    /// # Returns
+    /// An epoch at which the transaction was committed.
+    ///
     /// [`get`]: #method.get
-    pub fn commit(mut self) -> Result<()> {
-        self.try_mutate(|executor| executor.commit())?;
+    pub fn commit(mut self) -> Result<Epoch> {
+        let epoch = self.try_mutate(|worker| {
+            worker
+                .txn_executor
+                .commit(&worker.epoch_guard, &worker.logger)
+        })?;
         self.worker.txn_executor.end_transaction();
         self.is_active = false;
-        Ok(())
+        Ok(epoch)
     }
 
     /// Aborts the transaction.
@@ -158,12 +186,12 @@ impl<C: ConcurrencyControl> Transaction<'_, '_, C> {
 
     fn try_mutate<T, F>(&mut self, f: F) -> Result<T>
     where
-        F: FnOnce(&mut C::Executor<'_>) -> Result<T>,
+        F: FnOnce(&mut Worker<C>) -> Result<T>,
     {
         if !self.is_active {
             return Err(Error::AlreadyAborted);
         }
-        let result = f(&mut self.worker.txn_executor);
+        let result = f(self.worker);
         if result.is_err() {
             self.do_abort();
         }
