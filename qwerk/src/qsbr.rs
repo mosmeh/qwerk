@@ -16,7 +16,7 @@ impl Qsbr {
     pub fn acquire(&self) -> QsbrGuard {
         let guard = QsbrGuard {
             qsbr: self,
-            local_counter: self.local_counters.alloc_slot(),
+            local_counter: self.local_counters.alloc(),
         };
         guard.quiesce();
         guard

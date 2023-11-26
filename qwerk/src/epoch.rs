@@ -56,7 +56,7 @@ impl EpochFramework {
     pub fn acquire(&self) -> EpochGuard {
         let guard = EpochGuard {
             global_epoch: &self.shared.global_epoch,
-            local_epoch: self.shared.local_epochs.alloc_slot(),
+            local_epoch: self.shared.local_epochs.alloc(),
         };
         guard.refresh();
         guard
