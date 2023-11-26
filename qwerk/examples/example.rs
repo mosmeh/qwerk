@@ -1,4 +1,5 @@
-use qwerk::{ConcurrencyControl, Database, Optimistic, Pessimistic, Result};
+use anyhow::Result;
+use qwerk::{ConcurrencyControl, Database, Optimistic, Pessimistic};
 
 fn main() -> Result<()> {
     run::<Pessimistic>()?;
@@ -7,7 +8,7 @@ fn main() -> Result<()> {
 }
 
 fn run<C: ConcurrencyControl>() -> Result<()> {
-    let db = Database::<C>::new();
+    let db = Database::<C>::new()?;
     let mut worker = db.spawn_worker();
 
     let mut txn = worker.begin_transaction();
@@ -42,6 +43,8 @@ fn run<C: ConcurrencyControl>() -> Result<()> {
     assert_eq!(txn.get(b"alice")?, Some(b"quux".as_slice()));
     assert!(txn.get(b"bob")?.is_none());
     txn.commit()?;
+
+    db.flush()?;
 
     Ok(())
 }

@@ -1,3 +1,8 @@
+// Epoch framework is described in:
+// Tu et al. 2013. Speedy transactions in multicore in-memory databases. https://doi.org/10.1145/2517349.2522713
+// Chandramouli et al. 2018. FASTER: A Concurrent Key-Value Store with In-Place Updates. https://doi.org/10.1145/3183713.3196898
+// Li et al. 2022. Performant Almost-Latch-Free Data Structures Using Epoch Protection. https://doi.org/10.1145/3533737.3535091
+
 use crate::slotted_cell::{Slot, SlottedCell};
 use crossbeam_utils::{Backoff, CachePadded};
 use std::{
@@ -9,10 +14,8 @@ use std::{
     time::Duration,
 };
 
-// Epoch framework is described in:
-// Tu et al. 2013. Speedy transactions in multicore in-memory databases. https://doi.org/10.1145/2517349.2522713
-// Chandramouli et al. 2018. FASTER: A Concurrent Key-Value Store with In-Place Updates. https://doi.org/10.1145/3183713.3196898
-// Li et al. 2022. Performant Almost-Latch-Free Data Structures Using Epoch Protection. https://doi.org/10.1145/3533737.3535091
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Epoch(pub u32);
 
 pub struct EpochFramework {
     shared: Arc<SharedState>,
@@ -21,8 +24,8 @@ pub struct EpochFramework {
 
 impl EpochFramework {
     pub fn with_epoch_duration(epoch_duration: Duration) -> Self {
-        // >= 2 to make sure (reclamation epoch) = epoch - 2 >= 0
-        const INITIAL_EPOCH: u32 = 2;
+        // > 2 to make sure (reclamation epoch) = epoch - 2 > 0
+        const INITIAL_EPOCH: u32 = 3;
         let shared = Arc::new(SharedState {
             global_epoch: INITIAL_EPOCH.into(),
             local_epochs: Default::default(),
@@ -91,10 +94,10 @@ impl EpochGuard<'_> {
     /// Takes a snapshot of the current global epoch.
     ///
     /// Returns the current global epoch.
-    pub fn refresh(&self) -> u32 {
+    pub fn refresh(&self) -> Epoch {
         let epoch = self.global_epoch.load(SeqCst);
         self.local_epoch.store(epoch, SeqCst);
-        epoch
+        Epoch(epoch)
     }
 }
 

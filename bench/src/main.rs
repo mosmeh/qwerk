@@ -1,3 +1,4 @@
+use anyhow::Result;
 use clap::{arg, Parser, ValueEnum};
 use qwerk::{ConcurrencyControl, Database, Optimistic, Pessimistic};
 use rand::{distributions::WeightedIndex, prelude::Distribution, rngs::SmallRng, Rng, SeedableRng};
@@ -65,7 +66,7 @@ enum WorkloadKind {
     Variable,
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.protocol {
         Protocol::Optimistic => run_benchmark::<Optimistic>(cli),
@@ -73,7 +74,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
+fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> Result<()> {
     let workload = match cli.workload {
         WorkloadKind::A => Workload {
             read_proportion: 50,
@@ -117,7 +118,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
     };
 
     let shared = Arc::new(SharedState {
-        db: Database::<C>::new(),
+        db: Database::<C>::new()?,
         barrier: Barrier::new(cli.threads + 1),
         is_running: true.into(),
         latest: cli.records.into(),
@@ -143,7 +144,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> anyhow::Result<()> {
             let shared = shared.clone();
             let cli = cli.clone();
             let workload = workload.clone();
-            std::thread::spawn(move || -> anyhow::Result<_> {
+            std::thread::spawn(move || -> Result<_> {
                 #[cfg(feature = "affinity")]
                 anyhow::ensure!(core_affinity::set_for_current(core_id));
                 Ok(run_worker(cli, workload, &shared, worker_index))
@@ -266,7 +267,7 @@ fn run_worker<C: ConcurrencyControl>(
             break;
         }
         match result {
-            Ok(()) => stats.num_commits += 1,
+            Ok(_) => stats.num_commits += 1,
             Err(_) => stats.num_aborts += 1,
         }
     }

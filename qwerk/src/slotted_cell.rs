@@ -1,3 +1,6 @@
+// Based on the design of thread_local crate
+// https://github.com/Amanieu/thread_local-rs/blob/faa4409fafa3a5b4898c4e5025733f760a3eb665/src/lib.rs
+
 use parking_lot::Once;
 use std::{
     cell::UnsafeCell,
@@ -6,9 +9,6 @@ use std::{
     ops::Deref,
     sync::atomic::{AtomicBool, AtomicPtr, Ordering::SeqCst},
 };
-
-// Based on the design of thread_local crate
-// https://github.com/Amanieu/thread_local-rs/blob/faa4409fafa3a5b4898c4e5025733f760a3eb665/src/lib.rs
 
 const NUM_BUCKETS: usize = (usize::BITS - 1) as usize;
 

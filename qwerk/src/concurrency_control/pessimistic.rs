@@ -1,6 +1,8 @@
 use super::{ConcurrencyControl, ConcurrencyControlInternal, TransactionExecutor};
 use crate::{
+    epoch::{Epoch, EpochGuard},
     lock::NoWaitRwLock,
+    log::Logger,
     qsbr::{Qsbr, QsbrGuard},
     Error, Result, Shared,
 };
@@ -197,9 +199,22 @@ impl TransactionExecutor for Executor<'_> {
         Ok(())
     }
 
-    fn commit(&mut self) -> Result<()> {
+    fn commit(&mut self, epoch_guard: &EpochGuard, logger: &Logger) -> Result<Epoch> {
+        let mut reserver = logger.reserver();
+        for item in &self.working_set {
+            if let ItemKind::Write { .. } = item.kind {
+                let value = unsafe { item.record_ptr.as_ref().get() };
+                reserver.reserve_write(&item.key, value);
+            }
+        }
+        let reserved = reserver.finish();
+        let epoch = epoch_guard.refresh();
+        let mut entry = reserved.insert(epoch, 42); // TODO: tid
         for item in &self.working_set {
             let record = unsafe { item.record_ptr.as_ref() };
+            if let ItemKind::Write { .. } = item.kind {
+                entry.write(&item.key, unsafe { record.get() });
+            }
             if unsafe { record.get() }.is_none() {
                 self.index.remove(&item.key);
                 self.garbage_records.push(item.record_ptr);
@@ -210,7 +225,7 @@ impl TransactionExecutor for Executor<'_> {
                 ItemKind::Write { .. } => record.lock.unlock_exclusive(),
             }
         }
-        Ok(())
+        Ok(epoch)
     }
 
     fn abort(&mut self) {
