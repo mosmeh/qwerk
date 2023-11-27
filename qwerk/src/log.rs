@@ -95,19 +95,23 @@ impl LogSystem {
 
     pub fn flush(&self) -> std::io::Result<()> {
         for logger in self.loggers.iter() {
-            let mut current_buf = logger.current_buf.lock();
-            if current_buf
-                .as_ref()
-                .map(|buf| !buf.bytes.is_empty())
-                .unwrap_or_default()
             {
-                logger
-                    .flush_queue
-                    .push(current_buf.take().unwrap())
-                    .unwrap();
+                let mut current_buf = logger.current_buf.lock();
+                if current_buf
+                    .as_ref()
+                    .map(|buf| !buf.bytes.is_empty())
+                    .unwrap_or_default()
+                {
+                    // We don't use logger.queue() here, because we flush
+                    // the buffer by ourselves and don't need to request
+                    // a flush.
+                    logger
+                        .flush_queue
+                        .push(current_buf.take().unwrap())
+                        .unwrap();
+                }
             }
             logger.flush()?;
-            assert!(current_buf.is_none());
         }
         self.durable_epoch.update()?;
         Ok(())
@@ -199,6 +203,7 @@ impl DurableEpoch {
 
         // Atomically replace the file.
         std::fs::rename(TMP_PEPOCH_FILENAME, PEPOCH_FILENAME)?;
+        // TODO: fsync the parent directory.
 
         let prev_epoch = Epoch(self.epoch.swap(new_epoch.0, SeqCst));
         assert!(prev_epoch <= new_epoch);
@@ -382,24 +387,28 @@ impl LoggerInner {
     }
 
     fn flush(&self) -> std::io::Result<()> {
-        // While we are holding the lock, no other writer can pop from
-        // flush_queue, but the logger can still push to flush_queue.
-        let mut file = self.file.lock();
-
         if self.flush_queue.is_empty() {
             // The buffers have already been flushed when handling previous
-            // flush requests, because we may flush more than one buffer per
-            // request.
+            // flush requests, or are being flushed by other writers.
             return Ok(());
         }
 
-        let mut bufs = Vec::with_capacity(NUM_BUFS_PER_LOGGER);
-        let mut min_epoch = OnceCell::new();
-        for _ in 0..NUM_BUFS_PER_LOGGER {
-            let Some(buf) = self.flush_queue.pop() else {
-                break;
-            };
+        // While we are holding the lock, no other writer can pop from
+        // flush_queue, but the logger can still push to flush_queue.
+        //let mut file = self.file.lock();
+        let mut file = self.file.lock();
 
+        // Checking again, because buffers may have been flushed while we are
+        // waiting for the lock.
+        if self.flush_queue.is_empty() {
+            return Ok(());
+        }
+
+        assert!(self.flush_queue.len() <= NUM_BUFS_PER_LOGGER);
+
+        let mut bufs_to_flush = Vec::with_capacity(NUM_BUFS_PER_LOGGER);
+        let mut min_epoch = OnceCell::new();
+        while let Some(buf) = self.flush_queue.pop() {
             // Epoch must be monotonically increasing.
             let buf_min_epoch = *buf.min_epoch.get().unwrap();
             match min_epoch.get() {
@@ -408,18 +417,21 @@ impl LoggerInner {
             }
 
             assert!(!buf.bytes.is_empty());
-            bufs.push(buf.bytes);
+            bufs_to_flush.push(buf.bytes);
         }
         let next_durable_epoch = Epoch(min_epoch.take().unwrap().0 - 1);
-        assert!(!bufs.is_empty());
+        assert!(!bufs_to_flush.is_empty());
+        assert!(bufs_to_flush.len() <= NUM_BUFS_PER_LOGGER);
 
         let mut start_buf_index = 0;
         let mut start_offset = 0;
-        while start_buf_index < bufs.len() {
-            let mut slices = Vec::with_capacity(bufs.len() - start_buf_index);
-            slices.push(IoSlice::new(&bufs[start_buf_index][start_offset..]));
+        while start_buf_index < bufs_to_flush.len() {
+            let mut slices = Vec::with_capacity(bufs_to_flush.len() - start_buf_index);
+            slices.push(IoSlice::new(
+                &bufs_to_flush[start_buf_index][start_offset..],
+            ));
             slices.extend(
-                bufs[start_buf_index + 1..]
+                bufs_to_flush[start_buf_index + 1..]
                     .iter()
                     .map(|buf| IoSlice::new(buf)),
             );
@@ -438,7 +450,7 @@ impl LoggerInner {
                             break;
                         }
                     }
-                    for bytes in &mut bufs[start_buf_index..][..num_bufs_to_remove] {
+                    for bytes in &mut bufs_to_flush[start_buf_index..][..num_bufs_to_remove] {
                         let mut bytes = std::mem::take(bytes);
                         bytes.clear();
                         self.free_bufs_tx.try_send(bytes).unwrap();
@@ -447,7 +459,7 @@ impl LoggerInner {
                         start_buf_index += num_bufs_to_remove;
                         start_offset = 0;
                     }
-                    if start_buf_index < bufs.len() {
+                    if start_buf_index < bufs_to_flush.len() {
                         start_offset += left;
                     }
                 }
@@ -455,7 +467,7 @@ impl LoggerInner {
                 Err(e) => return Err(e),
             }
         }
-        assert_eq!(start_buf_index, bufs.len());
+        assert_eq!(start_buf_index, bufs_to_flush.len());
         file.sync_data()?;
 
         let prev_durable_epoch = Epoch(self.durable_epoch.swap(next_durable_epoch.0, SeqCst));
