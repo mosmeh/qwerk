@@ -38,7 +38,7 @@ impl ConcurrencyControlInternal for Pessimistic {
             qsbr: &self.qsbr,
             qsbr_guard: self.qsbr.acquire(),
             garbage_records: Default::default(),
-            working_set: Default::default(),
+            rw_set: Default::default(),
         }
     }
 }
@@ -77,12 +77,12 @@ pub struct Executor<'a> {
     garbage_records: Vec<Shared<Record>>,
 
     // Per-transaction state
-    working_set: Vec<WorkingItem>,
+    rw_set: Vec<RwItem>,
 }
 
 impl TransactionExecutor for Executor<'_> {
     fn begin_transaction(&mut self) {
-        self.working_set.clear();
+        self.rw_set.clear();
         self.qsbr_guard.quiesce();
     }
 
@@ -99,10 +99,7 @@ impl TransactionExecutor for Executor<'_> {
     }
 
     fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>> {
-        let item = self
-            .working_set
-            .iter()
-            .find(|item| item.key.as_ref() == key);
+        let item = self.rw_set.iter().find(|item| item.key.as_ref() == key);
         if let Some(item) = item {
             return Ok(unsafe { item.record_ptr.as_ref().get() });
         }
@@ -114,7 +111,7 @@ impl TransactionExecutor for Executor<'_> {
                 if !record.lock.try_lock_shared() {
                     return Err(Error::NotSerializable);
                 }
-                let item = WorkingItem {
+                let item = RwItem {
                     key: key.to_vec().into(),
                     record_ptr,
                     kind: ItemKind::Read,
@@ -128,7 +125,7 @@ impl TransactionExecutor for Executor<'_> {
                     lock: NoWaitRwLock::new_locked_shared(),
                 });
                 entry.insert_entry(record_ptr);
-                let item = WorkingItem {
+                let item = RwItem {
                     key: key.to_vec().into(),
                     record_ptr,
                     kind: ItemKind::Read,
@@ -136,15 +133,12 @@ impl TransactionExecutor for Executor<'_> {
                 (item, None)
             }
         };
-        self.working_set.push(item);
+        self.rw_set.push(item);
         Ok(value)
     }
 
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
-        let item = self
-            .working_set
-            .iter_mut()
-            .find(|item| item.key.as_ref() == key);
+        let item = self.rw_set.iter_mut().find(|item| item.key.as_ref() == key);
         if let Some(item) = item {
             let record = unsafe { item.record_ptr.as_ref() };
             match &item.kind {
@@ -173,7 +167,7 @@ impl TransactionExecutor for Executor<'_> {
                 }
                 let value = value.map(|value| value.to_vec().into());
                 let original_value = unsafe { record.replace(value) };
-                WorkingItem {
+                RwItem {
                     key: key.to_vec().into(),
                     record_ptr,
                     kind: ItemKind::Write { original_value },
@@ -186,7 +180,7 @@ impl TransactionExecutor for Executor<'_> {
                     lock: NoWaitRwLock::new_locked_exclusive(),
                 });
                 entry.insert_entry(record_ptr);
-                WorkingItem {
+                RwItem {
                     key: key.to_vec().into(),
                     record_ptr,
                     kind: ItemKind::Write {
@@ -195,13 +189,13 @@ impl TransactionExecutor for Executor<'_> {
                 }
             }
         };
-        self.working_set.push(item);
+        self.rw_set.push(item);
         Ok(())
     }
 
     fn commit(&mut self, epoch_guard: &EpochGuard, logger: &Logger) -> Result<Epoch> {
         let mut reserver = logger.reserver();
-        for item in &self.working_set {
+        for item in &self.rw_set {
             if let ItemKind::Write { .. } = item.kind {
                 let value = unsafe { item.record_ptr.as_ref().get() };
                 reserver.reserve_write(&item.key, value);
@@ -210,7 +204,7 @@ impl TransactionExecutor for Executor<'_> {
         let reserved = reserver.finish();
         let epoch = epoch_guard.refresh();
         let mut entry = reserved.insert(epoch, 42); // TODO: tid
-        for item in &self.working_set {
+        for item in &self.rw_set {
             let record = unsafe { item.record_ptr.as_ref() };
             if let ItemKind::Write { .. } = item.kind {
                 entry.write(&item.key, unsafe { record.get() });
@@ -229,7 +223,7 @@ impl TransactionExecutor for Executor<'_> {
     }
 
     fn abort(&mut self) {
-        for item in self.working_set.drain(..) {
+        for item in self.rw_set.drain(..) {
             let record = unsafe { item.record_ptr.as_ref() };
             match item.kind {
                 ItemKind::Read if unsafe { record.get() }.is_none() => {
@@ -269,7 +263,8 @@ impl Drop for Executor<'_> {
     }
 }
 
-struct WorkingItem {
+/// An item in the read or write set.
+struct RwItem {
     key: Box<[u8]>,
     record_ptr: Shared<Record>,
     kind: ItemKind,
