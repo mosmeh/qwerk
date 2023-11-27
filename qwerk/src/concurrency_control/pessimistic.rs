@@ -114,7 +114,7 @@ impl TransactionExecutor for Executor<'_> {
                 let item = RwItem {
                     key: key.to_vec().into(),
                     record_ptr,
-                    kind: ItemKind::Read,
+                    kind: ItemKind::Read { was_occupied: true },
                 };
                 let value = unsafe { record.get() };
                 (item, value)
@@ -122,13 +122,15 @@ impl TransactionExecutor for Executor<'_> {
             Entry::Vacant(entry) => {
                 let record_ptr = Shared::new(Record {
                     value: None.into(),
-                    lock: NoWaitRwLock::new_locked_shared(),
+                    lock: NoWaitRwLock::new_locked_exclusive(),
                 });
                 entry.insert_entry(record_ptr);
                 let item = RwItem {
                     key: key.to_vec().into(),
                     record_ptr,
-                    kind: ItemKind::Read,
+                    kind: ItemKind::Read {
+                        was_occupied: false,
+                    },
                 };
                 (item, None)
             }
@@ -142,9 +144,13 @@ impl TransactionExecutor for Executor<'_> {
         if let Some(item) = item {
             let record = unsafe { item.record_ptr.as_ref() };
             match &item.kind {
-                ItemKind::Read => {
-                    if !record.lock.try_upgrade() {
-                        return Err(Error::NotSerializable);
+                ItemKind::Read { was_occupied } => {
+                    if *was_occupied {
+                        if !record.lock.try_upgrade() {
+                            return Err(Error::NotSerializable);
+                        }
+                    } else {
+                        assert!(record.lock.is_locked_exclusive());
                     }
                     let value = value.map(|value| value.to_vec().into());
                     let original_value = unsafe { record.replace(value) };
@@ -210,12 +216,21 @@ impl TransactionExecutor for Executor<'_> {
                 entry.write(&item.key, unsafe { record.get() });
             }
             if unsafe { record.get() }.is_none() {
+                // The record is removed while being exclusively locked.
+                // This makes sure other transactions concurrently accessing
+                // the record abort, as we are using NO_WAIT deadlock
+                // prevention.
+                // This also applies to the record removal in abort().
+                assert!(record.lock.is_locked_exclusive());
                 self.index.remove(&item.key);
                 self.garbage_records.push(item.record_ptr);
                 continue;
             }
             match item.kind {
-                ItemKind::Read => record.lock.unlock_shared(),
+                ItemKind::Read { was_occupied } => {
+                    assert!(was_occupied);
+                    record.lock.unlock_shared();
+                }
                 ItemKind::Write { .. } => record.lock.unlock_exclusive(),
             }
         }
@@ -226,14 +241,19 @@ impl TransactionExecutor for Executor<'_> {
         for item in self.rw_set.drain(..) {
             let record = unsafe { item.record_ptr.as_ref() };
             match item.kind {
-                ItemKind::Read if unsafe { record.get() }.is_none() => {
+                ItemKind::Read {
+                    was_occupied: false,
+                } => {
+                    assert!(record.lock.is_locked_exclusive());
+                    assert!(unsafe { record.get() }.is_none());
                     self.index.remove(&item.key);
                     self.garbage_records.push(item.record_ptr);
                 }
-                ItemKind::Read => record.lock.unlock_shared(),
+                ItemKind::Read { was_occupied: true } => record.lock.unlock_shared(),
                 ItemKind::Write {
                     original_value: None,
                 } => {
+                    assert!(record.lock.is_locked_exclusive());
                     self.index.remove(&item.key);
                     self.garbage_records.push(item.record_ptr);
                 }
@@ -271,6 +291,6 @@ struct RwItem {
 }
 
 enum ItemKind {
-    Read,
+    Read { was_occupied: bool },
     Write { original_value: Option<Box<[u8]>> },
 }
