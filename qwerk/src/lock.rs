@@ -14,10 +14,6 @@ const READERS_FULL: u64 = !EXCLUSIVE;
 pub struct NoWaitRwLock(AtomicU64);
 
 impl NoWaitRwLock {
-    pub const fn new_locked_shared() -> Self {
-        Self(AtomicU64::new(READERS))
-    }
-
     pub const fn new_locked_exclusive() -> Self {
         Self(AtomicU64::new(EXCLUSIVE))
     }
