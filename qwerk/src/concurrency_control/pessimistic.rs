@@ -4,10 +4,11 @@ use crate::{
     lock::NoWaitRwLock,
     log::Logger,
     qsbr::{Qsbr, QsbrGuard},
+    tid::{Tid, TidGenerator},
     Error, Result, Shared,
 };
 use scc::{hash_index::Entry, HashIndex};
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 
 /// Pessimistic concurrency control.
 ///
@@ -36,6 +37,7 @@ impl ConcurrencyControlInternal for Pessimistic {
         Self::Executor {
             index,
             qsbr: &self.qsbr,
+            tid_generator: Default::default(),
             qsbr_guard: self.qsbr.acquire(),
             garbage_records: Default::default(),
             rw_set: Default::default(),
@@ -45,6 +47,7 @@ impl ConcurrencyControlInternal for Pessimistic {
 
 pub struct Record {
     value: UnsafeCell<Option<Box<[u8]>>>,
+    tid: Cell<Tid>,
     lock: NoWaitRwLock,
 }
 
@@ -73,6 +76,7 @@ pub struct Executor<'a> {
     qsbr: &'a Qsbr,
 
     // Per-executor state
+    tid_generator: TidGenerator,
     qsbr_guard: QsbrGuard<'a>,
     garbage_records: Vec<Shared<Record>>,
 
@@ -122,6 +126,7 @@ impl TransactionExecutor for Executor<'_> {
             Entry::Vacant(entry) => {
                 let record_ptr = Shared::new(Record {
                     value: None.into(),
+                    tid: Default::default(),
                     lock: NoWaitRwLock::new_locked_exclusive(),
                 });
                 entry.insert_entry(record_ptr);
@@ -183,6 +188,7 @@ impl TransactionExecutor for Executor<'_> {
                 let value = value.map(|value| value.to_vec().into());
                 let record_ptr = Shared::new(Record {
                     value: value.into(),
+                    tid: Default::default(),
                     lock: NoWaitRwLock::new_locked_exclusive(),
                 });
                 entry.insert_entry(record_ptr);
@@ -200,22 +206,28 @@ impl TransactionExecutor for Executor<'_> {
     }
 
     fn commit(&mut self, epoch_guard: &EpochGuard, logger: &Logger) -> Result<Epoch> {
+        let mut tid_rw_set = self.tid_generator.begin_transaction();
         let mut reserver = logger.reserver();
         for item in &self.rw_set {
+            let record = unsafe { item.record_ptr.as_ref() };
+            tid_rw_set.add(record.tid.get());
             if let ItemKind::Write { .. } = item.kind {
-                let value = unsafe { item.record_ptr.as_ref().get() };
-                reserver.reserve_write(&item.key, value);
+                reserver.reserve_write(&item.key, unsafe { record.get() });
             }
         }
         let reserved = reserver.finish();
+
         let epoch = epoch_guard.refresh();
-        let mut entry = reserved.insert(epoch, 42); // TODO: tid
+        let new_tid = tid_rw_set.generate_tid(epoch);
+
+        let mut entry = reserved.insert(new_tid);
         for item in &self.rw_set {
             let record = unsafe { item.record_ptr.as_ref() };
-            if let ItemKind::Write { .. } = item.kind {
-                entry.write(&item.key, unsafe { record.get() });
+            let value = unsafe { record.get() };
+            if let ItemKind::Write { .. } = &item.kind {
+                entry.write(&item.key, value);
             }
-            if unsafe { record.get() }.is_none() {
+            if value.is_none() {
                 // The record is removed while being exclusively locked.
                 // This makes sure other transactions concurrently accessing
                 // the record abort, as we are using NO_WAIT deadlock
@@ -231,7 +243,10 @@ impl TransactionExecutor for Executor<'_> {
                     assert!(was_occupied);
                     record.lock.unlock_shared();
                 }
-                ItemKind::Write { .. } => record.lock.unlock_exclusive(),
+                ItemKind::Write { .. } => {
+                    record.tid.set(new_tid);
+                    record.lock.unlock_exclusive();
+                }
             }
         }
         Ok(epoch)
