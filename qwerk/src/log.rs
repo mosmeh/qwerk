@@ -1,6 +1,7 @@
 use crate::{
     epoch::Epoch,
     slotted_cell::{Slot, SlottedCell},
+    tid::Tid,
 };
 use crossbeam_channel::{Receiver, Sender};
 use crossbeam_queue::ArrayQueue;
@@ -23,7 +24,7 @@ const TMP_PEPOCH_FILENAME: &str = "data/pepoch.tmp";
 
 const NUM_WRITERS: usize = 4;
 const PREALLOCATED_BUF_SIZE: usize = 1024 * 1024;
-const NUM_BUFS_PER_LOGGER: usize = 4;
+const NUM_BUFS_PER_LOGGER: usize = 8;
 
 /// A redo logging system.
 pub struct LogSystem {
@@ -279,14 +280,15 @@ pub struct ReservedCapacity<'a> {
 }
 
 impl<'a> ReservedCapacity<'a> {
-    pub fn insert(mut self, epoch: Epoch, tid: u64) -> Entry<'a> {
+    pub fn insert(mut self, tid: Tid) -> Entry<'a> {
         let buf = self.buf.as_mut().unwrap();
-        buf.bytes.extend_from_slice(&tid.to_le_bytes());
+        buf.bytes.extend_from_slice(&tid.0.to_le_bytes());
 
         let num_records_offset = buf.bytes.len();
         buf.bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // placeholder
 
         // Epoch must be monotonically increasing.
+        let epoch = tid.epoch();
         let min_epoch = *buf.min_epoch.get_or_init(|| epoch);
         assert!(min_epoch <= epoch);
 

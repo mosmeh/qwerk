@@ -3,6 +3,7 @@ use crate::{
     epoch::{Epoch, EpochGuard},
     log::Logger,
     qsbr::{Qsbr, QsbrGuard},
+    tid::{Tid, TidGenerator},
     Error, Result,
 };
 use crossbeam_utils::Backoff;
@@ -11,18 +12,6 @@ use std::{
     cell::OnceCell,
     sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::SeqCst},
 };
-
-// TID
-// bits[63:32] - epoch
-// bits[31:2]  - sequence
-// bit [1]     - absent
-// bit [0]     - locked
-
-const EPOCH_SHIFT: u64 = 32;
-const SEQUENCE_SHIFT: u64 = 2;
-const ABSENT: u64 = 0x2;
-const LOCKED: u64 = 0x1;
-const FLAGS: u64 = ABSENT | LOCKED;
 
 /// Optimistic concurrency control.
 ///
@@ -50,7 +39,7 @@ impl ConcurrencyControlInternal for Optimistic {
         Self::Executor {
             index,
             qsbr: &self.qsbr,
-            max_tid: 0,
+            tid_generator: Default::default(),
             garbage_bytes: 0,
             garbage_values: Default::default(),
             garbage_records: Default::default(),
@@ -81,21 +70,24 @@ impl Record {
     /// Locks the record if it is present.
     ///
     /// Returns the TID before the locking operation.
-    fn lock_if_present(&self) -> u64 {
+    fn lock_if_present(&self) -> Tid {
         let backoff = Backoff::new();
         loop {
-            let current_tid = self.tid.load(SeqCst);
-            if current_tid & ABSENT != 0 {
+            let current_tid = Tid(self.tid.load(SeqCst));
+            if current_tid.is_absent() {
                 return current_tid;
             }
-            if current_tid & LOCKED != 0 {
+            if current_tid.is_locked() {
                 backoff.snooze();
                 continue;
             }
 
-            let result =
-                self.tid
-                    .compare_exchange_weak(current_tid, current_tid | LOCKED, SeqCst, SeqCst);
+            let result = self.tid.compare_exchange_weak(
+                current_tid.0,
+                current_tid.with_locked().0,
+                SeqCst,
+                SeqCst,
+            );
             if result.is_ok() {
                 return current_tid;
             }
@@ -107,15 +99,15 @@ impl Record {
     fn read(&self) -> RecordSnapshot {
         let backoff = Backoff::new();
         loop {
-            let tid1 = self.tid.load(SeqCst);
-            if tid1 & ABSENT != 0 {
+            let tid1 = Tid(self.tid.load(SeqCst));
+            if tid1.is_absent() {
                 return RecordSnapshot {
                     buf_ptr: std::ptr::null_mut(),
                     len: 0,
                     tid: tid1,
                 };
             }
-            if tid1 & LOCKED != 0 {
+            if tid1.is_locked() {
                 backoff.snooze();
                 continue;
             }
@@ -123,7 +115,7 @@ impl Record {
             let buf_ptr = self.buf_ptr.load(SeqCst);
             let len = self.len.load(SeqCst);
 
-            let tid2 = self.tid.load(SeqCst);
+            let tid2 = Tid(self.tid.load(SeqCst));
             if tid1 == tid2 {
                 return RecordSnapshot {
                     buf_ptr,
@@ -139,7 +131,7 @@ impl Record {
 struct RecordSnapshot {
     buf_ptr: *mut u8,
     len: usize,
-    tid: u64,
+    tid: Tid,
 }
 
 pub struct Executor<'a> {
@@ -148,7 +140,7 @@ pub struct Executor<'a> {
     qsbr: &'a Qsbr,
 
     // Per-executor state
-    max_tid: u64,
+    tid_generator: TidGenerator,
     garbage_bytes: usize,
     garbage_values: Vec<Box<[u8]>>,
     garbage_records: Vec<Shared<Record>>,
@@ -206,7 +198,7 @@ impl TransactionExecutor for Executor<'_> {
                 key,
                 value: None,
                 record_ptr: None,
-                tid: 0,
+                tid: Default::default(),
             },
         };
 
@@ -221,7 +213,7 @@ impl TransactionExecutor for Executor<'_> {
             .iter_mut()
             .find(|item| item.key.as_ref() == key);
         if let Some(item) = item {
-            item.tid |= LOCKED;
+            item.tid = item.tid.with_locked();
         }
 
         let value = value.map(|value| value.to_vec().into());
@@ -254,10 +246,7 @@ impl TransactionExecutor for Executor<'_> {
         // The stability of the sort doesn't matter because the keys are unique.
         self.write_set.sort_unstable_by(|a, b| a.key.cmp(&b.key));
 
-        // New TID should be
-        // (b) larger than the worker’s most recently chosen TID
-        let mut max_tid = self.max_tid;
-
+        let mut tid_rw_set = self.tid_generator.begin_transaction();
         for item in &mut self.write_set {
             let mut was_occupied = false;
             let record_ptr = match self.index.entry(item.key.clone()) {
@@ -269,7 +258,7 @@ impl TransactionExecutor for Executor<'_> {
                     let record_ptr = Shared::new(Record {
                         buf_ptr: AtomicPtr::new(std::ptr::null_mut()),
                         len: 0.into(),
-                        tid: LOCKED.into(),
+                        tid: Tid::default().with_locked().0.into(),
                     });
                     entry.insert_entry(record_ptr);
                     record_ptr
@@ -277,15 +266,11 @@ impl TransactionExecutor for Executor<'_> {
             };
             if was_occupied {
                 let tid = unsafe { record_ptr.as_ref() }.lock_if_present();
-                if tid & ABSENT != 0 {
+                if tid.is_absent() {
                     // The record was removed by another transaction.
                     return Err(Error::NotSerializable);
                 }
-
-                // New TID should be
-                // (a) larger than the TID of any record read or written
-                //     by the transaction
-                max_tid = max_tid.max(tid);
+                tid_rw_set.add(tid);
             }
             item.record_ptr
                 .set(record_ptr)
@@ -299,7 +284,7 @@ impl TransactionExecutor for Executor<'_> {
         for item in &self.read_set {
             let record_ptr = match item.record_ptr {
                 Some(record_ptr) => record_ptr,
-                None if item.tid & LOCKED != 0 => {
+                None if item.tid.is_locked() => {
                     // This item is also in the write set.
                     self.index
                         .peek_with(&item.key, |_, value| *value)
@@ -315,35 +300,21 @@ impl TransactionExecutor for Executor<'_> {
                 }
             };
 
-            let tid = unsafe { record_ptr.as_ref() }.tid.load(SeqCst);
+            let tid = Tid(unsafe { record_ptr.as_ref() }.tid.load(SeqCst));
             if tid != item.tid {
                 // The TID doesn't match or the record is locked by
                 // another transaction.
                 return Err(Error::NotSerializable);
             }
-            assert!(tid & ABSENT == 0);
+            assert!(!tid.is_absent());
 
-            // New TID should be
-            // (a) larger than the TID of any record read or written
-            //     by the transaction
-            max_tid = max_tid.max(tid & !FLAGS);
+            tid_rw_set.add(tid);
         }
 
-        // New TID should be
-        // (c) in the current global epoch
-        let epoch_of_max_tid = Epoch((max_tid >> EPOCH_SHIFT) as u32);
-        assert!(epoch_of_max_tid <= current_epoch);
-        let mut new_tid = if epoch_of_max_tid == current_epoch {
-            max_tid
-        } else {
-            (current_epoch.0 as u64) << EPOCH_SHIFT
-        };
-        new_tid += 1 << SEQUENCE_SHIFT;
-        assert!(new_tid & FLAGS == 0);
-        self.max_tid = new_tid;
+        let new_tid = tid_rw_set.generate_tid(current_epoch);
 
         // Phase 3: write phase
-        let mut entry = reserved.insert(current_epoch, new_tid);
+        let mut entry = reserved.insert(new_tid);
         for item in self.write_set.drain(..) {
             entry.write(item.key.as_ref(), item.value.as_deref());
 
@@ -368,11 +339,11 @@ impl TransactionExecutor for Executor<'_> {
             if new_buf_ptr.is_null() {
                 let was_removed = self.index.remove(&item.key);
                 assert!(was_removed);
-                new_record_tid |= ABSENT;
+                new_record_tid = new_record_tid.with_absent();
             }
 
             // Store new TID and unlock the record.
-            record.tid.store(new_record_tid, SeqCst);
+            record.tid.store(new_record_tid.0, SeqCst);
 
             if !prev_buf_ptr.is_null() {
                 self.garbage_values.push(unsafe {
@@ -396,16 +367,16 @@ impl TransactionExecutor for Executor<'_> {
             };
 
             let record = unsafe { record_ptr.as_ref() };
-            let mut new_record_tid = record.tid.load(SeqCst) & !LOCKED;
+            let mut new_record_tid = Tid(record.tid.load(SeqCst)).without_locked();
 
             let value_is_null = record.buf_ptr.load(SeqCst).is_null();
             if value_is_null {
                 let was_removed = self.index.remove(&item.key);
                 assert!(was_removed);
-                new_record_tid |= ABSENT;
+                new_record_tid = new_record_tid.with_absent();
             }
 
-            record.tid.store(new_record_tid, SeqCst);
+            record.tid.store(new_record_tid.0, SeqCst);
 
             if value_is_null {
                 self.garbage_records.push(record_ptr);
@@ -438,11 +409,36 @@ struct ReadItem<'a> {
     key: Box<[u8]>,
     value: Option<&'a [u8]>,
     record_ptr: Option<Shared<Record>>,
-    tid: u64,
+    tid: Tid,
 }
 
 struct WriteItem {
     key: Box<[u8]>,
     value: Option<Box<[u8]>>,
     record_ptr: OnceCell<Shared<Record>>,
+}
+
+impl Tid {
+    const ABSENT: u64 = 0x2;
+    const LOCKED: u64 = 0x1;
+
+    const fn is_absent(self) -> bool {
+        self.0 & Self::ABSENT != 0
+    }
+
+    const fn is_locked(self) -> bool {
+        self.0 & Self::LOCKED != 0
+    }
+
+    const fn with_absent(self) -> Self {
+        Self(self.0 | Self::ABSENT)
+    }
+
+    const fn with_locked(self) -> Self {
+        Self(self.0 | Self::LOCKED)
+    }
+
+    const fn without_locked(self) -> Self {
+        Self(self.0 & !Self::LOCKED)
+    }
 }

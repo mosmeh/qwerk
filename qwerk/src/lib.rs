@@ -5,6 +5,7 @@ mod log;
 mod qsbr;
 mod shared;
 mod slotted_cell;
+mod tid;
 
 pub use concurrency_control::{ConcurrencyControl, Optimistic, Pessimistic};
 pub use epoch::Epoch;
