@@ -126,7 +126,7 @@ impl TransactionExecutor for Executor<'_> {
             Entry::Vacant(entry) => {
                 let record_ptr = Shared::new(Record {
                     value: None.into(),
-                    tid: Default::default(),
+                    tid: Tid::ZERO.into(),
                     lock: NoWaitRwLock::new_locked_exclusive(),
                 });
                 entry.insert_entry(record_ptr);
@@ -188,7 +188,7 @@ impl TransactionExecutor for Executor<'_> {
                 let value = value.map(|value| value.to_vec().into());
                 let record_ptr = Shared::new(Record {
                     value: value.into(),
-                    tid: Default::default(),
+                    tid: Tid::ZERO.into(),
                     lock: NoWaitRwLock::new_locked_exclusive(),
                 });
                 entry.insert_entry(record_ptr);

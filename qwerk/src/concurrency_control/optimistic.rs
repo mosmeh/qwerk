@@ -198,7 +198,7 @@ impl TransactionExecutor for Executor<'_> {
                 key,
                 value: None,
                 record_ptr: None,
-                tid: Default::default(),
+                tid: Tid::ZERO,
             },
         };
 
@@ -258,7 +258,7 @@ impl TransactionExecutor for Executor<'_> {
                     let record_ptr = Shared::new(Record {
                         buf_ptr: AtomicPtr::new(std::ptr::null_mut()),
                         len: 0.into(),
-                        tid: Tid::default().with_locked().0.into(),
+                        tid: Tid::ZERO.with_locked().0.into(),
                     });
                     entry.insert_entry(record_ptr);
                     record_ptr
