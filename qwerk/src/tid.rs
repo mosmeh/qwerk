@@ -6,10 +6,11 @@ use crate::Epoch;
 // bits[1:0]   - flags (concurrency control protocol-specific)
 
 /// Transaction ID and flag bits.
-#[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Tid(pub u64);
 
 impl Tid {
+    pub const ZERO: Self = Self(0);
     const EPOCH_SHIFT: u32 = 32;
     const SEQUENCE_SHIFT: u32 = 2;
     const FLAGS: u64 = (1 << Self::SEQUENCE_SHIFT) - 1;
@@ -36,9 +37,14 @@ impl Tid {
 }
 
 /// A generator of Silo-style TIDs.
-#[derive(Default)]
 pub struct TidGenerator {
     max_tid: Tid,
+}
+
+impl Default for TidGenerator {
+    fn default() -> Self {
+        Self { max_tid: Tid::ZERO }
+    }
 }
 
 impl TidGenerator {

@@ -5,7 +5,7 @@ use crate::{
 };
 use crossbeam_channel::{Receiver, Sender};
 use crossbeam_queue::ArrayQueue;
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use std::{
     cell::OnceCell,
     fs::{DirBuilder, File},
@@ -22,16 +22,16 @@ pub const DATA_DIR: &str = "data";
 pub const PEPOCH_FILENAME: &str = "data/pepoch";
 const TMP_PEPOCH_FILENAME: &str = "data/pepoch.tmp";
 
-const NUM_WRITERS: usize = 4;
+const NUM_FLUSHERS: usize = 4;
 const PREALLOCATED_BUF_SIZE: usize = 1024 * 1024;
 const NUM_BUFS_PER_LOGGER: usize = 8;
 
 /// A redo logging system.
 pub struct LogSystem {
-    loggers: Arc<SlottedCell<LoggerInner>>,
+    channels: Arc<SlottedCell<LogChannel>>,
     durable_epoch: Arc<DurableEpoch>,
     flush_req_tx: Option<Sender<FlushRequest>>,
-    writers: Vec<JoinHandle<()>>,
+    flushers: Vec<JoinHandle<()>>,
     daemon: Option<JoinHandle<()>>,
     is_running: Arc<AtomicBool>,
 }
@@ -40,43 +40,43 @@ impl LogSystem {
     pub fn new() -> std::io::Result<Self> {
         DirBuilder::new().recursive(true).create(DATA_DIR)?;
 
-        let loggers = Arc::new(SlottedCell::<LoggerInner>::default());
+        let channels = Arc::new(SlottedCell::<LogChannel>::default());
 
-        // flush_req is not a member of LoggerInner, because we want to tell
-        // writers to exit by closing the channel, but the writers hold
-        // references to LoggerInner.
+        // flush_req is not a member of LogChannel, because we want to tell
+        // flushers to exit by closing the channel, but the flushers hold
+        // references to LogChannel.
         let (flush_req_tx, flush_req_rx) = crossbeam_channel::unbounded::<FlushRequest>();
 
-        let writers = (0..NUM_WRITERS)
+        let flushers = (0..NUM_FLUSHERS)
             .map(|_| {
-                let loggers = loggers.clone();
+                let channels = channels.clone();
                 let flush_req_rx = flush_req_rx.clone();
                 std::thread::spawn(move || {
                     while let Ok(req) = flush_req_rx.recv() {
-                        loggers.get(req.logger_id).unwrap().flush().unwrap();
+                        channels.get(req.logger_id).unwrap().flush().unwrap();
                     }
                 })
             })
             .collect();
 
-        let durable_epoch = Arc::new(DurableEpoch::new(loggers.clone()));
+        let durable_epoch = Arc::new(DurableEpoch::new(channels.clone()));
         let is_running = Arc::new(AtomicBool::new(true));
         let daemon = {
-            let loggers = loggers.clone();
+            let channels = channels.clone();
             let durable_epoch = durable_epoch.clone();
             let flush_req_tx = flush_req_tx.clone();
             let is_running = is_running.clone();
             std::thread::Builder::new()
                 .name("log_system_daemon".into())
-                .spawn(move || run_daemon(&loggers, &durable_epoch, flush_req_tx, &is_running))
+                .spawn(move || run_daemon(&channels, &durable_epoch, flush_req_tx, &is_running))
                 .unwrap()
         };
 
         Ok(Self {
-            loggers,
+            channels,
             durable_epoch,
             flush_req_tx: Some(flush_req_tx),
-            writers,
+            flushers,
             daemon: Some(daemon),
             is_running,
         })
@@ -84,7 +84,7 @@ impl LogSystem {
 
     pub fn spawn_logger(&self) -> Logger {
         Logger {
-            inner: self.loggers.alloc_with(LoggerInner::new),
+            channel: self.channels.alloc_with(LogChannel::new),
             flush_req_tx: self.flush_req_tx.clone().unwrap(),
         }
     }
@@ -94,24 +94,22 @@ impl LogSystem {
     }
 
     pub fn flush(&self) -> std::io::Result<()> {
-        for logger in self.loggers.iter() {
+        for channel in self.channels.iter() {
             {
-                let mut current_buf = logger.current_buf.lock();
-                if current_buf
+                let mut producer = channel.producer.lock();
+                let buf = &mut producer.current_buf;
+                if buf
                     .as_ref()
                     .map(|buf| !buf.bytes.is_empty())
                     .unwrap_or_default()
                 {
-                    // We don't use logger.queue() here, because we flush
+                    // We don't use channel.queue() here, because we flush
                     // the buffer by ourselves and don't need to request
                     // a flush.
-                    logger
-                        .flush_queue
-                        .push(current_buf.take().unwrap())
-                        .unwrap();
+                    channel.flush_queue.push(buf.take().unwrap()).unwrap();
                 }
             }
-            logger.flush()?;
+            channel.flush()?;
         }
         self.durable_epoch.update()?;
         Ok(())
@@ -123,8 +121,8 @@ impl Drop for LogSystem {
         self.is_running.store(false, SeqCst);
         self.flush_req_tx.take().unwrap();
         self.daemon.take().unwrap().join().unwrap();
-        for writer in self.writers.drain(..) {
-            writer.join().unwrap();
+        for flusher in self.flushers.drain(..) {
+            flusher.join().unwrap();
         }
         let _ = self.flush();
     }
@@ -138,25 +136,26 @@ impl Drop for LogSystem {
 // 2. It periodically updates the durable epoch by calculating the minimum
 //    durable epoch of all loggers.
 fn run_daemon(
-    loggers: &SlottedCell<LoggerInner>,
+    channels: &SlottedCell<LogChannel>,
     durable_epoch: &DurableEpoch,
     flush_req_tx: Sender<FlushRequest>,
     is_running: &AtomicBool,
 ) {
     while is_running.load(SeqCst) {
-        for logger in loggers.iter() {
-            // Failure of this lock means that the logger is writing to
+        for channel in channels.iter() {
+            // Failure of this lock means that a logger is writing to
             // the buffer. In that case we can just let the logger
             // queue the buffer by itself if needed.
-            let Some(mut current_buf) = logger.current_buf.try_lock() else {
+            let Some(mut producer) = channel.producer.try_lock() else {
                 continue;
             };
-            if current_buf
+            let buf = &mut producer.current_buf;
+            if buf
                 .as_ref()
                 .map(|buf| !buf.bytes.is_empty())
                 .unwrap_or_default()
             {
-                logger.queue(current_buf.take().unwrap(), &flush_req_tx);
+                channel.queue(buf.take().unwrap(), &flush_req_tx);
             }
         }
         durable_epoch.update().unwrap();
@@ -167,15 +166,15 @@ fn run_daemon(
 struct DurableEpoch {
     epoch: AtomicU32,
     mutex: Mutex<()>,
-    loggers: Arc<SlottedCell<LoggerInner>>,
+    channels: Arc<SlottedCell<LogChannel>>,
 }
 
 impl DurableEpoch {
-    fn new(loggers: Arc<SlottedCell<LoggerInner>>) -> Self {
+    fn new(channels: Arc<SlottedCell<LogChannel>>) -> Self {
         Self {
             epoch: Default::default(),
             mutex: Default::default(),
-            loggers,
+            channels,
         }
     }
 
@@ -187,9 +186,9 @@ impl DurableEpoch {
         let _guard = self.mutex.lock();
 
         let new_epoch = self
-            .loggers
+            .channels
             .iter()
-            .map(|logger| Epoch(logger.durable_epoch.load(SeqCst)))
+            .map(|channel| Epoch(channel.durable_epoch.load(SeqCst)))
             .min();
         let Some(new_epoch) = new_epoch else {
             return Ok(());
@@ -216,7 +215,7 @@ struct FlushRequest {
     logger_id: usize,
 }
 
-// Architecture (single logger):
+// Architecture (single logger/channel):
 //                                            +---- flush_req ----+
 //                                            |                   |
 //                                            |                   v
@@ -227,7 +226,7 @@ struct FlushRequest {
 //                                  +---- free_bufs <----+   durable_epoch
 
 pub struct Logger<'a> {
-    inner: Slot<'a, LoggerInner>,
+    channel: Slot<'a, LogChannel>,
     flush_req_tx: Sender<FlushRequest>,
 }
 
@@ -235,12 +234,12 @@ impl Logger<'_> {
     pub const fn reserver(&self) -> Reserver {
         Reserver {
             logger: self,
-            num_bytes: std::mem::size_of::<u64>() * 2, // tid, num_records
+            num_bytes: std::mem::size_of::<u64>() * 2, // tid and num_records
         }
     }
 
     fn queue(&self, buf: LogBuf) {
-        self.inner.queue(buf, &self.flush_req_tx);
+        self.channel.queue(buf, &self.flush_req_tx);
     }
 }
 
@@ -258,30 +257,36 @@ impl<'a> Reserver<'a> {
     }
 
     pub fn finish(self) -> ReservedCapacity<'a> {
-        let mut buf = self.logger.inner.current_buf.lock();
-        if buf
+        let mut producer = self.logger.channel.producer.lock();
+        if producer
+            .current_buf
             .as_ref()
             .map(|buf| {
                 !buf.bytes.is_empty() && buf.bytes.len() + self.num_bytes > PREALLOCATED_BUF_SIZE
             })
             .unwrap_or_default()
         {
-            self.logger.queue(buf.take().unwrap());
+            self.logger.queue(producer.current_buf.take().unwrap());
         }
-        if buf.is_none() {
-            *buf = Some(LogBuf::new(self.logger.inner.free_bufs_rx.recv().unwrap()));
+        if producer.current_buf.is_none() {
+            producer.current_buf = Some(LogBuf::new(producer.free_bufs_rx.recv().unwrap()));
         }
-        buf.as_mut().unwrap().bytes.reserve(self.num_bytes);
+        producer
+            .current_buf
+            .as_mut()
+            .unwrap()
+            .bytes
+            .reserve(self.num_bytes);
         ReservedCapacity {
             logger: self.logger,
-            buf,
+            buf: MutexGuard::map(producer, |producer| &mut producer.current_buf),
         }
     }
 }
 
 pub struct ReservedCapacity<'a> {
     logger: &'a Logger<'a>,
-    buf: MutexGuard<'a, Option<LogBuf>>,
+    buf: MappedMutexGuard<'a, Option<LogBuf>>,
 }
 
 impl<'a> ReservedCapacity<'a> {
@@ -308,7 +313,7 @@ impl<'a> ReservedCapacity<'a> {
 
 pub struct Entry<'a> {
     logger: &'a Logger<'a>,
-    buf: MutexGuard<'a, Option<LogBuf>>,
+    buf: MappedMutexGuard<'a, Option<LogBuf>>,
     num_records_offset: usize,
     num_records: usize,
 }
@@ -344,17 +349,25 @@ impl Drop for Entry<'_> {
     }
 }
 
-struct LoggerInner {
-    logger_id: usize,
-    file: Mutex<File>,
-    current_buf: Mutex<Option<LogBuf>>,
-    flush_queue: ArrayQueue<LogBuf>,
-    free_bufs_tx: Sender<Vec<u8>>,
+struct Producer {
+    current_buf: Option<LogBuf>,
     free_bufs_rx: Receiver<Vec<u8>>,
-    durable_epoch: AtomicU32,
 }
 
-impl LoggerInner {
+struct Consumer {
+    file: File,
+    free_bufs_tx: Sender<Vec<u8>>,
+}
+
+struct LogChannel {
+    logger_id: usize,
+    flush_queue: ArrayQueue<LogBuf>,
+    durable_epoch: AtomicU32,
+    producer: Mutex<Producer>,
+    consumer: Mutex<Consumer>,
+}
+
+impl LogChannel {
     fn new(logger_id: usize) -> Self {
         let path = format!("{}/log-{}", DATA_DIR, logger_id);
         let file = File::create(path).unwrap();
@@ -366,12 +379,13 @@ impl LoggerInner {
         }
         Self {
             logger_id,
-            file: file.into(),
-            current_buf: Default::default(),
             flush_queue: ArrayQueue::new(NUM_BUFS_PER_LOGGER),
-            free_bufs_tx,
-            free_bufs_rx,
             durable_epoch: Default::default(),
+            producer: Mutex::new(Producer {
+                current_buf: Default::default(),
+                free_bufs_rx,
+            }),
+            consumer: Mutex::new(Consumer { file, free_bufs_tx }),
         }
     }
 
@@ -389,14 +403,13 @@ impl LoggerInner {
     fn flush(&self) -> std::io::Result<()> {
         if self.flush_queue.is_empty() {
             // The buffers have already been flushed when handling previous
-            // flush requests, or are being flushed by other writers.
+            // flush requests, or are being flushed by other flushers.
             return Ok(());
         }
 
-        // While we are holding the lock, no other writer can pop from
+        // While we are holding the lock, no other flusher can pop from
         // flush_queue, but the logger can still push to flush_queue.
-        //let mut file = self.file.lock();
-        let mut file = self.file.lock();
+        let mut consumer = self.consumer.lock();
 
         // Checking again, because buffers may have been flushed while we are
         // waiting for the lock.
@@ -437,7 +450,7 @@ impl LoggerInner {
             );
 
             // TODO: Use write_vectored_all once it is stabilized.
-            match file.write_vectored(&slices) {
+            match consumer.file.write_vectored(&slices) {
                 Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
                 Ok(n) => {
                     let mut num_bufs_to_remove = 0;
@@ -453,7 +466,7 @@ impl LoggerInner {
                     for bytes in &mut bufs_to_flush[start_buf_index..][..num_bufs_to_remove] {
                         let mut bytes = std::mem::take(bytes);
                         bytes.clear();
-                        self.free_bufs_tx.try_send(bytes).unwrap();
+                        consumer.free_bufs_tx.try_send(bytes).unwrap();
                     }
                     if num_bufs_to_remove > 0 {
                         start_buf_index += num_bufs_to_remove;
@@ -468,7 +481,7 @@ impl LoggerInner {
             }
         }
         assert_eq!(start_buf_index, bufs_to_flush.len());
-        file.sync_data()?;
+        consumer.file.sync_data()?;
 
         let prev_durable_epoch = Epoch(self.durable_epoch.swap(next_durable_epoch.0, SeqCst));
         assert!(prev_durable_epoch <= next_durable_epoch);
