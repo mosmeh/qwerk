@@ -4,6 +4,7 @@ use crate::{
     lock::NoWaitRwLock,
     log::Logger,
     qsbr::{Qsbr, QsbrGuard},
+    small_bytes::SmallBytes,
     tid::{Tid, TidGenerator},
     Error, Result, Shared,
 };
@@ -32,7 +33,7 @@ impl ConcurrencyControlInternal for Pessimistic {
 
     fn spawn_executor<'a>(
         &'a self,
-        index: &'a HashIndex<Box<[u8]>, Shared<Self::Record>>,
+        index: &'a HashIndex<SmallBytes, Shared<Self::Record>>,
     ) -> Self::Executor<'a> {
         Self::Executor {
             index,
@@ -46,7 +47,7 @@ impl ConcurrencyControlInternal for Pessimistic {
 }
 
 pub struct Record {
-    value: UnsafeCell<Option<Box<[u8]>>>,
+    value: UnsafeCell<Option<SmallBytes>>,
     tid: Cell<Tid>,
     lock: NoWaitRwLock,
 }
@@ -59,12 +60,12 @@ impl Record {
         (*self.value.get()).as_deref()
     }
 
-    unsafe fn set(&self, value: Option<Box<[u8]>>) {
+    unsafe fn set(&self, value: Option<SmallBytes>) {
         assert!(self.lock.is_locked_exclusive());
         *self.value.get() = value;
     }
 
-    unsafe fn replace(&self, value: Option<Box<[u8]>>) -> Option<Box<[u8]>> {
+    unsafe fn replace(&self, value: Option<SmallBytes>) -> Option<SmallBytes> {
         assert!(self.lock.is_locked_exclusive());
         std::mem::replace(&mut *self.value.get(), value)
     }
@@ -72,7 +73,7 @@ impl Record {
 
 pub struct Executor<'a> {
     // Global state
-    index: &'a HashIndex<Box<[u8]>, Shared<Record>>,
+    index: &'a HashIndex<SmallBytes, Shared<Record>>,
     qsbr: &'a Qsbr,
 
     // Per-executor state
@@ -108,7 +109,7 @@ impl TransactionExecutor for Executor<'_> {
             return Ok(unsafe { item.record_ptr.as_ref().get() });
         }
 
-        let (item, value) = match self.index.entry(key.to_vec().into()) {
+        let (item, value) = match self.index.entry(key.into()) {
             Entry::Occupied(entry) => {
                 let record_ptr = *entry.get();
                 let record = unsafe { record_ptr.as_ref() };
@@ -116,7 +117,7 @@ impl TransactionExecutor for Executor<'_> {
                     return Err(Error::NotSerializable);
                 }
                 let item = RwItem {
-                    key: key.to_vec().into(),
+                    key: key.into(),
                     record_ptr,
                     kind: ItemKind::Read { was_occupied: true },
                 };
@@ -131,7 +132,7 @@ impl TransactionExecutor for Executor<'_> {
                 });
                 entry.insert_entry(record_ptr);
                 let item = RwItem {
-                    key: key.to_vec().into(),
+                    key: key.into(),
                     record_ptr,
                     kind: ItemKind::Read {
                         was_occupied: false,
@@ -157,35 +158,35 @@ impl TransactionExecutor for Executor<'_> {
                     } else {
                         assert!(record.lock.is_locked_exclusive());
                     }
-                    let value = value.map(|value| value.to_vec().into());
+                    let value = value.map(|value| value.into());
                     let original_value = unsafe { record.replace(value) };
                     item.kind = ItemKind::Write { original_value };
                 }
                 ItemKind::Write { .. } => {
-                    let value = value.map(|value| value.to_vec().into());
+                    let value = value.map(|value| value.into());
                     unsafe { record.set(value) };
                 }
             }
             return Ok(());
         }
 
-        let item = match self.index.entry(key.to_vec().into()) {
+        let item = match self.index.entry(key.into()) {
             Entry::Occupied(entry) => {
                 let record_ptr = *entry.get();
                 let record = unsafe { record_ptr.as_ref() };
                 if !record.lock.try_lock_exclusive() {
                     return Err(Error::NotSerializable);
                 }
-                let value = value.map(|value| value.to_vec().into());
+                let value = value.map(|value| value.into());
                 let original_value = unsafe { record.replace(value) };
                 RwItem {
-                    key: key.to_vec().into(),
+                    key: key.into(),
                     record_ptr,
                     kind: ItemKind::Write { original_value },
                 }
             }
             Entry::Vacant(entry) => {
-                let value = value.map(|value| value.to_vec().into());
+                let value = value.map(|value| value.into());
                 let record_ptr = Shared::new(Record {
                     value: value.into(),
                     tid: Tid::ZERO.into(),
@@ -193,7 +194,7 @@ impl TransactionExecutor for Executor<'_> {
                 });
                 entry.insert_entry(record_ptr);
                 RwItem {
-                    key: key.to_vec().into(),
+                    key: key.into(),
                     record_ptr,
                     kind: ItemKind::Write {
                         original_value: None,
@@ -300,12 +301,12 @@ impl Drop for Executor<'_> {
 
 /// An item in the read or write set.
 struct RwItem {
-    key: Box<[u8]>,
+    key: SmallBytes,
     record_ptr: Shared<Record>,
     kind: ItemKind,
 }
 
 enum ItemKind {
     Read { was_occupied: bool },
-    Write { original_value: Option<Box<[u8]>> },
+    Write { original_value: Option<SmallBytes> },
 }

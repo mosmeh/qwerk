@@ -5,6 +5,7 @@ mod log;
 mod qsbr;
 mod shared;
 mod slotted_cell;
+mod small_bytes;
 mod tid;
 
 pub use concurrency_control::{ConcurrencyControl, Optimistic, Pessimistic};
@@ -15,6 +16,7 @@ use epoch::{EpochFramework, EpochGuard};
 use log::{LogSystem, Logger};
 use scc::HashIndex;
 use shared::Shared;
+use small_bytes::SmallBytes;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -30,7 +32,7 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct Database<C: ConcurrencyControl> {
-    index: HashIndex<Box<[u8]>, Shared<C::Record>>,
+    index: HashIndex<SmallBytes, Shared<C::Record>>,
     concurrency_control: C,
     epoch_fw: EpochFramework,
     log_system: LogSystem,
@@ -217,3 +219,13 @@ impl<C: ConcurrencyControl> Drop for Transaction<'_, '_, C> {
         self.do_abort()
     }
 }
+
+macro_rules! assert_eq_size {
+    ($x:ty, $y:ty) => {
+        const _: fn() = || {
+            let _ = std::mem::transmute::<$x, $y>;
+        };
+    };
+}
+
+pub(crate) use assert_eq_size;
