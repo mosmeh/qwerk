@@ -185,12 +185,20 @@ impl DurableEpoch {
     fn update(&self) -> std::io::Result<()> {
         let _guard = self.mutex.lock();
 
-        let new_epoch = self
-            .channels
-            .iter()
-            .map(|channel| Epoch(channel.durable_epoch.load(SeqCst)))
-            .min();
-        let Some(new_epoch) = new_epoch else {
+        let mut min_epoch = None;
+        for channel in self.channels.iter() {
+            let Some(durable_epoch) = channel.durable_epoch() else {
+                // This logger has not flushed anything yet.
+                // We would underestimate the durable epoch if we skip
+                // this logger, so we don't update the durable epoch.
+                return Ok(());
+            };
+            match min_epoch {
+                Some(min_epoch) if min_epoch <= durable_epoch => (),
+                _ => min_epoch = Some(durable_epoch),
+            }
+        }
+        let Some(new_epoch) = min_epoch else {
             return Ok(());
         };
 
@@ -386,6 +394,16 @@ impl LogChannel {
                 free_bufs_rx,
             }),
             consumer: Mutex::new(Consumer { file, free_bufs_tx }),
+        }
+    }
+
+    fn durable_epoch(&self) -> Option<Epoch> {
+        // durable_epoch is zero if no flush has happened yet.
+        let epoch = self.durable_epoch.load(SeqCst);
+        if epoch > 0 {
+            Some(Epoch(epoch))
+        } else {
+            None
         }
     }
 
