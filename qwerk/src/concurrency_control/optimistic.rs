@@ -3,6 +3,7 @@ use crate::{
     epoch::{Epoch, EpochGuard},
     log::Logger,
     qsbr::{Qsbr, QsbrGuard},
+    small_bytes::SmallBytes,
     tid::{Tid, TidGenerator},
     Error, Result,
 };
@@ -34,7 +35,7 @@ impl ConcurrencyControlInternal for Optimistic {
 
     fn spawn_executor<'a>(
         &'a self,
-        index: &'a HashIndex<Box<[u8]>, Shared<Self::Record>>,
+        index: &'a HashIndex<SmallBytes, Shared<Self::Record>>,
     ) -> Self::Executor<'a> {
         Self::Executor {
             index,
@@ -136,7 +137,7 @@ struct RecordSnapshot {
 
 pub struct Executor<'a> {
     // Global state
-    index: &'a HashIndex<Box<[u8]>, Shared<Record>>,
+    index: &'a HashIndex<SmallBytes, Shared<Record>>,
     qsbr: &'a Qsbr,
 
     // Per-executor state
@@ -178,7 +179,7 @@ impl TransactionExecutor for Executor<'_> {
             return Ok(item.value);
         }
 
-        let key = key.to_vec().into();
+        let key = key.into();
         let record_ptr = self.index.peek_with(&key, |_, value| *value);
         let item = match record_ptr {
             Some(record_ptr) => {
@@ -227,7 +228,7 @@ impl TransactionExecutor for Executor<'_> {
         }
 
         self.write_set.push(WriteItem {
-            key: key.to_vec().into(),
+            key: key.into(),
             value,
             record_ptr: Default::default(),
         });
@@ -406,14 +407,14 @@ impl Drop for Executor<'_> {
 }
 
 struct ReadItem<'a> {
-    key: Box<[u8]>,
+    key: SmallBytes,
     value: Option<&'a [u8]>,
     record_ptr: Option<Shared<Record>>,
     tid: Tid,
 }
 
 struct WriteItem {
-    key: Box<[u8]>,
+    key: SmallBytes,
     value: Option<Box<[u8]>>,
     record_ptr: OnceCell<Shared<Record>>,
 }

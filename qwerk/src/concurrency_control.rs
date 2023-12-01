@@ -7,6 +7,7 @@ pub use pessimistic::Pessimistic;
 use crate::{
     epoch::{Epoch, EpochGuard},
     log::Logger,
+    small_bytes::SmallBytes,
     Result, Shared,
 };
 use scc::HashIndex;
@@ -27,7 +28,7 @@ pub trait ConcurrencyControlInternal: Send + Sync + 'static {
 
     fn spawn_executor<'a>(
         &'a self,
-        index: &'a HashIndex<Box<[u8]>, Shared<Self::Record>>,
+        index: &'a HashIndex<SmallBytes, Shared<Self::Record>>,
     ) -> Self::Executor<'a>;
 }
 
