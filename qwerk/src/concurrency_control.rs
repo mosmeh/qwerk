@@ -7,10 +7,8 @@ pub use pessimistic::Pessimistic;
 use crate::{
     epoch::{Epoch, EpochGuard},
     log::Logger,
-    small_bytes::SmallBytes,
-    Result, Shared,
+    Index, Result, Shared,
 };
-use scc::HashIndex;
 
 const GC_THRESHOLD_BYTES: usize = 4096;
 
@@ -26,10 +24,7 @@ pub trait ConcurrencyControlInternal: Send + Sync + 'static {
     // `Default` to the user.
     fn init() -> Self;
 
-    fn spawn_executor<'a>(
-        &'a self,
-        index: &'a HashIndex<SmallBytes, Shared<Self::Record>>,
-    ) -> Self::Executor<'a>;
+    fn spawn_executor<'a>(&'a self, index: &'a Index<Self::Record>) -> Self::Executor<'a>;
 }
 
 pub trait TransactionExecutor {
