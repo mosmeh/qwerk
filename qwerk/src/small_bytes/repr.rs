@@ -2,7 +2,7 @@ crate::assert_eq_size!(usize, u64);
 
 const MAX_INLINE_LEN: usize = 15;
 
-/// An immutable vector of bytes that can store up to 15 bytes inline.
+/// An owned, immutable sequence of bytes that can store up to 15 bytes inline.
 ///
 /// Values larger than 15 bytes are stored on the heap.
 #[repr(C)]
@@ -45,24 +45,42 @@ enum Tag {
 }
 
 impl Repr {
-    pub fn new(bytes: &[u8]) -> Self {
+    pub fn from_slice(bytes: &[u8]) -> Self {
         let len = bytes.len();
         if len <= MAX_INLINE_LEN {
-            let mut buf = [0; MAX_INLINE_LEN + 1];
-            buf[MAX_INLINE_LEN] = len as u8 + Tag::InlineLen0 as u8;
-            buf[..len].copy_from_slice(bytes);
-            unsafe { std::mem::transmute(buf) }
+            unsafe { Self::new_inline_unchecked(bytes) }
         } else {
-            assert!(len < (1 << (32 + 16 + 8))); // 64 petabytes, should be enough
-            let ptr = Box::into_raw(bytes.to_vec().into_boxed_slice());
-            Self(
-                ptr.cast(),
-                len as u32,
-                (len >> 32) as u16,
-                (len >> 48) as u8,
-                Tag::Heap,
-            )
+            Self::new_heap(bytes.to_vec().into_boxed_slice())
         }
+    }
+
+    pub fn from_boxed_slice(bytes: Box<[u8]>) -> Self {
+        let len = bytes.len();
+        if len <= MAX_INLINE_LEN {
+            unsafe { Self::new_inline_unchecked(&bytes) }
+        } else {
+            Self::new_heap(bytes)
+        }
+    }
+
+    unsafe fn new_inline_unchecked(bytes: &[u8]) -> Self {
+        let mut buf = [0; MAX_INLINE_LEN + 1];
+        buf[MAX_INLINE_LEN] = bytes.len() as u8 + Tag::InlineLen0 as u8;
+        buf[..bytes.len()].copy_from_slice(bytes);
+        std::mem::transmute(buf)
+    }
+
+    fn new_heap(bytes: Box<[u8]>) -> Self {
+        let len = bytes.len();
+        assert!(len < (1 << (32 + 16 + 8))); // 64 petabytes. Should be enough.
+        let ptr = Box::into_raw(bytes);
+        Self(
+            ptr.cast(),
+            len as u32,
+            (len >> 32) as u16,
+            (len >> 48) as u8,
+            Tag::Heap,
+        )
     }
 
     pub const fn as_slice(&self) -> &[u8] {
@@ -99,6 +117,6 @@ impl Drop for Repr {
 
 impl Clone for Repr {
     fn clone(&self) -> Self {
-        Self::new(self.as_slice())
+        Self::from_slice(self.as_slice())
     }
 }
