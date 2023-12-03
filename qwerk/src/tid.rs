@@ -5,34 +5,37 @@ use crate::Epoch;
 // bits[31:2]  - sequence (distinguishes transactions within the same epoch)
 // bits[1:0]   - flags (concurrency control protocol-specific)
 
+const EPOCH_SHIFT: u32 = 32;
+const SEQUENCE_SHIFT: u32 = 2;
+const FLAGS: u64 = (1 << SEQUENCE_SHIFT) - 1;
+
 /// Transaction ID and flag bits.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Tid(pub u64);
 
 impl Tid {
     pub const ZERO: Self = Self(0);
-    const EPOCH_SHIFT: u32 = 32;
-    const SEQUENCE_SHIFT: u32 = 2;
-    const FLAGS: u64 = (1 << Self::SEQUENCE_SHIFT) - 1;
 
     pub const fn epoch(self) -> Epoch {
-        Epoch((self.0 >> Self::EPOCH_SHIFT) as u32)
+        Epoch((self.0 >> EPOCH_SHIFT) as u32)
     }
 
     const fn from_epoch_and_sequence(epoch: Epoch, sequence: u32) -> Self {
-        Self(((epoch.0 as u64) << Self::EPOCH_SHIFT) | ((sequence as u64) << Self::SEQUENCE_SHIFT))
+        Self(((epoch.0 as u64) << EPOCH_SHIFT) | ((sequence as u64) << SEQUENCE_SHIFT))
     }
 
-    const fn increment_sequence(self) -> Self {
-        Self(self.0 + (1 << Self::SEQUENCE_SHIFT))
+    fn increment_sequence(self) -> Self {
+        let new = Self(self.0 + (1 << SEQUENCE_SHIFT));
+        assert_eq!(new.epoch(), self.epoch()); // TODO: handle overflow
+        new
     }
 
     const fn has_flags(self) -> bool {
-        self.0 & Self::FLAGS != 0
+        self.0 & FLAGS != 0
     }
 
     const fn without_flags(self) -> Self {
-        Self(self.0 & !Self::FLAGS)
+        Self(self.0 & !FLAGS)
     }
 }
 
