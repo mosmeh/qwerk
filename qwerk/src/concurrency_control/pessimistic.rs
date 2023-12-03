@@ -1,7 +1,7 @@
 use super::{ConcurrencyControl, ConcurrencyControlInternal, TransactionExecutor};
 use crate::{
     epoch::{Epoch, EpochGuard},
-    lock::NoWaitRwLock,
+    lock::Lock,
     log::Logger,
     qsbr::{Qsbr, QsbrGuard},
     small_bytes::SmallBytes,
@@ -46,7 +46,7 @@ impl ConcurrencyControlInternal for Pessimistic {
 pub struct Record {
     value: UnsafeCell<Option<SmallBytes>>,
     tid: Cell<Tid>,
-    lock: NoWaitRwLock,
+    lock: Lock,
 }
 
 unsafe impl Sync for Record {}
@@ -125,7 +125,7 @@ impl TransactionExecutor for Executor<'_> {
                 let record_ptr = Shared::new(Record {
                     value: None.into(),
                     tid: Tid::ZERO.into(),
-                    lock: NoWaitRwLock::new_locked_exclusive(),
+                    lock: Lock::new_locked_exclusive(),
                 });
                 entry.insert_entry(record_ptr);
                 let item = RwItem {
@@ -187,7 +187,7 @@ impl TransactionExecutor for Executor<'_> {
                 let record_ptr = Shared::new(Record {
                     value: value.into(),
                     tid: Tid::ZERO.into(),
-                    lock: NoWaitRwLock::new_locked_exclusive(),
+                    lock: Lock::new_locked_exclusive(),
                 });
                 entry.insert_entry(record_ptr);
                 RwItem {
