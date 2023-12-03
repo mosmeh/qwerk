@@ -6,9 +6,9 @@ use crate::{
     qsbr::{Qsbr, QsbrGuard},
     small_bytes::SmallBytes,
     tid::{Tid, TidGenerator},
-    Error, Result, Shared,
+    Error, Index, Result, Shared,
 };
-use scc::{hash_index::Entry, HashIndex};
+use scc::hash_index::Entry;
 use std::cell::{Cell, UnsafeCell};
 
 /// Pessimistic concurrency control.
@@ -31,10 +31,7 @@ impl ConcurrencyControlInternal for Pessimistic {
         }
     }
 
-    fn spawn_executor<'a>(
-        &'a self,
-        index: &'a HashIndex<SmallBytes, Shared<Self::Record>>,
-    ) -> Self::Executor<'a> {
+    fn spawn_executor<'a>(&'a self, index: &'a Index<Self::Record>) -> Self::Executor<'a> {
         Self::Executor {
             index,
             qsbr: &self.qsbr,
@@ -73,7 +70,7 @@ impl Record {
 
 pub struct Executor<'a> {
     // Global state
-    index: &'a HashIndex<SmallBytes, Shared<Record>>,
+    index: &'a Index<Record>,
     qsbr: &'a Qsbr,
 
     // Per-executor state

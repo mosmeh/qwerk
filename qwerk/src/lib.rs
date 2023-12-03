@@ -31,8 +31,10 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+type Index<T> = HashIndex<SmallBytes, Shared<T>>;
+
 pub struct Database<C: ConcurrencyControl> {
-    index: HashIndex<SmallBytes, Shared<C::Record>>,
+    index: Index<C::Record>,
     concurrency_control: C,
     epoch_fw: EpochFramework,
     log_system: LogSystem,
