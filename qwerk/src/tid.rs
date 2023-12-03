@@ -20,6 +20,22 @@ impl Tid {
         Epoch((self.0 >> EPOCH_SHIFT) as u32)
     }
 
+    pub const fn sequence(self) -> u32 {
+        (self.0 >> SEQUENCE_SHIFT) as u32
+    }
+
+    pub const fn flags(self) -> u8 {
+        (self.0 & FLAGS) as u8
+    }
+
+    pub const fn has_flags(self) -> bool {
+        self.0 & FLAGS != 0
+    }
+
+    const fn without_flags(self) -> Self {
+        Self(self.0 & !FLAGS)
+    }
+
     const fn from_epoch_and_sequence(epoch: Epoch, sequence: u32) -> Self {
         Self(((epoch.0 as u64) << EPOCH_SHIFT) | ((sequence as u64) << SEQUENCE_SHIFT))
     }
@@ -29,13 +45,16 @@ impl Tid {
         assert_eq!(new.epoch(), self.epoch()); // TODO: handle overflow
         new
     }
+}
 
-    const fn has_flags(self) -> bool {
-        self.0 & FLAGS != 0
-    }
-
-    const fn without_flags(self) -> Self {
-        Self(self.0 & !FLAGS)
+impl std::fmt::Debug for Tid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tid")
+            .field("raw", &self.0)
+            .field("epoch", &self.epoch())
+            .field("sequence", &self.sequence())
+            .field("flags", &self.flags())
+            .finish()
     }
 }
 
