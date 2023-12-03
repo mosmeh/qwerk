@@ -256,3 +256,93 @@ impl<'a, T> Iterator for Iter<'a, T> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SlottedCell;
+    use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn test_alloc() {
+        let cell = SlottedCell::<Cell<u32>>::default();
+        let (ptr1, ptr2) = {
+            let slot1 = cell.alloc();
+            let slot2 = cell.alloc();
+            assert_ne!(slot1.as_ptr(), slot2.as_ptr());
+            (slot1.as_ptr(), slot2.as_ptr())
+        };
+        let slot1 = cell.alloc();
+        let slot2 = cell.alloc();
+        assert_eq!(slot1.as_ptr(), ptr1);
+        assert_eq!(slot2.as_ptr(), ptr2);
+    }
+
+    #[test]
+    fn test_alloc_with() {
+        let cell = SlottedCell::default();
+        let slot1 = cell.alloc_with(|i| {
+            assert_eq!(i, 0);
+            Cell::new(1)
+        });
+        let slot2 = cell.alloc_with(|i| {
+            assert_eq!(i, 1);
+            Cell::new(2)
+        });
+        assert_ne!(slot1.as_ptr(), slot2.as_ptr());
+        assert_eq!(slot1.get(), 1);
+        assert_eq!(slot2.get(), 2);
+    }
+
+    #[test]
+    fn test_get() {
+        let cell = SlottedCell::<Cell<u32>>::default();
+        let (ptr1, ptr2) = {
+            let slot1 = cell.alloc();
+            let slot2 = cell.alloc();
+            assert_eq!(cell.get(0).unwrap().as_ptr(), slot1.as_ptr());
+            assert_eq!(cell.get(1).unwrap().as_ptr(), slot2.as_ptr());
+            assert_eq!(cell.get(2), None);
+            (slot1.as_ptr(), slot2.as_ptr())
+        };
+        assert_eq!(cell.get(0).unwrap().as_ptr(), ptr1);
+        assert_eq!(cell.get(1).unwrap().as_ptr(), ptr2);
+        assert_eq!(cell.get(2), None);
+    }
+
+    #[test]
+    fn test_drop() {
+        struct NeedsDrop(Rc<Cell<bool>>);
+
+        impl Drop for NeedsDrop {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        let cell = SlottedCell::<NeedsDrop>::default();
+        let dropped = Rc::new(Cell::new(false));
+        let slot = cell.alloc_with(|_| NeedsDrop(dropped.clone()));
+        drop(slot);
+        assert!(!dropped.get());
+        drop(cell);
+        assert!(dropped.get());
+    }
+
+    #[test]
+    fn test_iter() {
+        let cell = SlottedCell::<Cell<u32>>::default();
+        let (ptr1, ptr2) = {
+            let slot1 = cell.alloc();
+            let slot2 = cell.alloc();
+            let mut iter = cell.iter();
+            assert_eq!(iter.next().unwrap().as_ptr(), slot1.as_ptr());
+            assert_eq!(iter.next().unwrap().as_ptr(), slot2.as_ptr());
+            assert!(iter.next().is_none());
+            (slot1.as_ptr(), slot2.as_ptr())
+        };
+        let mut iter = cell.iter();
+        assert_eq!(iter.next().unwrap().as_ptr(), ptr1);
+        assert_eq!(iter.next().unwrap().as_ptr(), ptr2);
+        assert!(iter.next().is_none());
+    }
+}
