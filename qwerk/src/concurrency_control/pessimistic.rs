@@ -110,9 +110,10 @@ impl TransactionExecutor for Executor<'_> {
             Entry::Occupied(entry) => {
                 let record_ptr = *entry.get();
                 let record = unsafe { record_ptr.as_ref() };
-                if !record.lock.try_lock_shared() {
+                let Some(guard) = record.lock.try_read() else {
                     return Err(Error::NotSerializable);
-                }
+                };
+                std::mem::forget(guard);
                 let item = RwItem {
                     key: key.into(),
                     record_ptr,
@@ -149,9 +150,10 @@ impl TransactionExecutor for Executor<'_> {
             match &item.kind {
                 ItemKind::Read { was_occupied } => {
                     if *was_occupied {
-                        if !record.lock.try_upgrade() {
+                        let Some(guard) = record.lock.try_upgrade() else {
                             return Err(Error::NotSerializable);
-                        }
+                        };
+                        std::mem::forget(guard);
                     } else {
                         assert!(record.lock.is_locked_exclusive());
                     }
@@ -171,9 +173,10 @@ impl TransactionExecutor for Executor<'_> {
             Entry::Occupied(entry) => {
                 let record_ptr = *entry.get();
                 let record = unsafe { record_ptr.as_ref() };
-                if !record.lock.try_lock_exclusive() {
+                let Some(guard) = record.lock.try_write() else {
                     return Err(Error::NotSerializable);
-                }
+                };
+                std::mem::forget(guard);
                 let value = value.map(|value| value.into());
                 let original_value = unsafe { record.replace(value) };
                 RwItem {
@@ -239,11 +242,11 @@ impl TransactionExecutor for Executor<'_> {
             match item.kind {
                 ItemKind::Read { was_occupied } => {
                     assert!(was_occupied);
-                    record.lock.unlock_shared();
+                    record.lock.force_unlock_read();
                 }
                 ItemKind::Write { .. } => {
                     record.tid.set(new_tid);
-                    record.lock.unlock_exclusive();
+                    record.lock.force_unlock_write();
                 }
             }
         }
@@ -262,7 +265,7 @@ impl TransactionExecutor for Executor<'_> {
                     self.index.remove(&item.key);
                     self.garbage_records.push(item.record_ptr);
                 }
-                ItemKind::Read { was_occupied: true } => record.lock.unlock_shared(),
+                ItemKind::Read { was_occupied: true } => record.lock.force_unlock_read(),
                 ItemKind::Write {
                     original_value: None,
                 } => {
@@ -272,7 +275,7 @@ impl TransactionExecutor for Executor<'_> {
                 }
                 ItemKind::Write { original_value } => {
                     unsafe { record.set(original_value) };
-                    record.lock.unlock_exclusive();
+                    record.lock.force_unlock_write();
                 }
             }
         }
