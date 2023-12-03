@@ -7,8 +7,12 @@ mod repr {
     pub struct Repr(Box<[u8]>);
 
     impl Repr {
-        pub fn new(bytes: &[u8]) -> Self {
+        pub fn from_slice(bytes: &[u8]) -> Self {
             Self(bytes.to_vec().into_boxed_slice())
+        }
+
+        pub fn from_boxed_slice(bytes: Box<[u8]>) -> Self {
+            Self(bytes)
         }
 
         pub const fn as_slice(&self) -> &[u8] {
@@ -22,6 +26,7 @@ use repr::Repr;
 crate::assert_eq_size!(Repr, Box<[u8]>);
 crate::assert_eq_size!(Repr, Option<Repr>);
 
+/// An owned, immutable sequence of bytes.
 #[derive(Clone)]
 pub struct SmallBytes(Repr);
 
@@ -37,7 +42,19 @@ impl SmallBytes {
 
 impl From<&[u8]> for SmallBytes {
     fn from(bytes: &[u8]) -> Self {
-        Self(Repr::new(bytes))
+        Self(Repr::from_slice(bytes))
+    }
+}
+
+impl From<Vec<u8>> for SmallBytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        bytes.into_boxed_slice().into()
+    }
+}
+
+impl From<Box<[u8]>> for SmallBytes {
+    fn from(bytes: Box<[u8]>) -> Self {
+        Self(Repr::from_boxed_slice(bytes))
     }
 }
 
@@ -81,19 +98,18 @@ mod tests {
 
     #[test]
     fn test() {
-        let inline1 = SmallBytes::new(b"");
-        assert!(inline1.as_slice().is_empty());
+        for bytes in [
+            b"".as_slice(),
+            b"foo",
+            b"123456789012345",
+            b"1234567890123456",
+            b"supercalifragilisticexpialidocious",
+        ] {
+            let from_slice = SmallBytes::new(bytes);
+            assert_eq!(from_slice.as_slice(), bytes);
 
-        let inline2 = SmallBytes::new(b"foo");
-        assert_eq!(inline2.as_slice(), b"foo");
-
-        let inline3 = SmallBytes::new(b"123456789012345");
-        assert_eq!(inline3.as_slice(), b"123456789012345");
-
-        let heap1 = SmallBytes::new(b"1234567890123456");
-        assert_eq!(heap1.as_slice(), b"1234567890123456");
-
-        let heap2 = SmallBytes::new(b"supercalifragilisticexpialidocious");
-        assert_eq!(heap2.as_slice(), b"supercalifragilisticexpialidocious");
+            let from_vec = SmallBytes::from(bytes.to_vec());
+            assert_eq!(from_vec.as_slice(), bytes);
+        }
     }
 }
