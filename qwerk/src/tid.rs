@@ -21,7 +21,9 @@ impl Tid {
     }
 
     pub const fn sequence(self) -> u32 {
-        (self.0 >> SEQUENCE_SHIFT) as u32
+        const EPOCH_MASK: u32 = (1 << (EPOCH_SHIFT - SEQUENCE_SHIFT)) - 1;
+        let shifted = (self.0 >> SEQUENCE_SHIFT) as u32;
+        shifted & EPOCH_MASK
     }
 
     pub const fn flags(self) -> u8 {
@@ -60,12 +62,14 @@ impl std::fmt::Debug for Tid {
 
 /// A generator of Silo-style TIDs.
 pub struct TidGenerator {
-    max_tid: Tid,
+    last_tid: Tid,
 }
 
 impl Default for TidGenerator {
     fn default() -> Self {
-        Self { max_tid: Tid::ZERO }
+        Self {
+            last_tid: Tid::ZERO,
+        }
     }
 }
 
@@ -73,7 +77,7 @@ impl TidGenerator {
     pub fn begin_transaction(&mut self) -> TidRwSet {
         // The new TID must be:
         // (b) larger than the worker’s most recently chosen TID
-        let max_tid = self.max_tid;
+        let max_tid = self.last_tid;
         TidRwSet {
             generator: self,
             max_tid,
@@ -109,7 +113,28 @@ impl TidRwSet<'_> {
         new_tid = new_tid.increment_sequence();
 
         assert!(!new_tid.has_flags());
-        self.generator.max_tid = new_tid;
+        self.generator.last_tid = new_tid;
         new_tid
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Tid;
+    use crate::Epoch;
+
+    #[test]
+    fn test_tid() {
+        let tid = Tid::from_epoch_and_sequence(Epoch(42), 35);
+        assert_eq!(tid.epoch(), Epoch(42));
+        assert_eq!(tid.sequence(), 35);
+        assert_eq!(tid.flags(), 0);
+        assert!(!tid.has_flags());
+
+        let tid = tid.increment_sequence();
+        assert_eq!(tid.epoch(), Epoch(42));
+        assert_eq!(tid.sequence(), 36);
+        assert_eq!(tid.flags(), 0);
+        assert!(!tid.has_flags());
     }
 }
