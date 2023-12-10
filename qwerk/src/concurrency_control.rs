@@ -24,7 +24,11 @@ pub trait ConcurrencyControlInternal: Send + Sync + 'static {
     // `Default` to the user.
     fn init() -> Self;
 
-    fn spawn_executor<'a>(&'a self, index: &'a Index<Self::Record>) -> Self::Executor<'a>;
+    fn spawn_executor<'a>(
+        &'a self,
+        index: &'a Index<Self::Record>,
+        epoch_guard: EpochGuard<'a>,
+    ) -> Self::Executor<'a>;
 }
 
 pub trait TransactionExecutor {
@@ -33,7 +37,7 @@ pub trait TransactionExecutor {
 
     fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>>;
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()>;
-    fn commit(&mut self, epoch_guard: &EpochGuard, logger: &Logger) -> Result<Epoch>;
+    fn commit(&mut self, logger: &Logger) -> Result<Epoch>;
 
     /// Aborts the transaction.
     ///
