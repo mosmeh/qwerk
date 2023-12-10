@@ -99,10 +99,31 @@ impl EpochGuard<'_> {
         self.local_epoch.store(epoch, SeqCst);
         Epoch(epoch)
     }
+
+    /// Temporarily marks the owner of this guard as not participating in the
+    /// epoch framework.
+    ///
+    /// Until the next call to [`refresh`], the owner of this guard is not
+    /// considered as a participant of the epoch framework.
+    ///
+    /// [`refresh`]: #method.refresh
+    pub fn release(&self) {
+        self.local_epoch.store(u32::MAX, SeqCst);
+    }
+
+    /// Returns the reclamation epoch.
+    ///
+    /// The reclamation epoch is the epoch up to which all the resources freed
+    /// in the epoch are guaranteed to be no longer used.
+    pub fn reclamation_epoch(&self) -> Epoch {
+        // All local_epochs are either global_epoch or global_epoch - 1.
+        // Therefore, reclamation_epoch >= self.local_epoch - 2.
+        Epoch(self.local_epoch.load(SeqCst) - 2)
+    }
 }
 
 impl Drop for EpochGuard<'_> {
     fn drop(&mut self) {
-        self.local_epoch.store(u32::MAX, SeqCst);
+        self.release();
     }
 }

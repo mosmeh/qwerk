@@ -33,10 +33,15 @@ impl ConcurrencyControlInternal for Optimistic {
         }
     }
 
-    fn spawn_executor<'a>(&'a self, index: &'a Index<Self::Record>) -> Self::Executor<'a> {
+    fn spawn_executor<'a>(
+        &'a self,
+        index: &'a Index<Self::Record>,
+        epoch_guard: EpochGuard<'a>,
+    ) -> Self::Executor<'a> {
         Self::Executor {
             index,
             qsbr: &self.qsbr,
+            epoch_guard,
             tid_generator: Default::default(),
             garbage_bytes: 0,
             garbage_values: Default::default(),
@@ -135,6 +140,7 @@ pub struct Executor<'a> {
     qsbr: &'a Qsbr,
 
     // Per-executor state
+    epoch_guard: EpochGuard<'a>,
     tid_generator: TidGenerator,
     garbage_bytes: usize,
     garbage_values: Vec<Box<[u8]>>,
@@ -151,9 +157,11 @@ impl TransactionExecutor for Executor<'_> {
         self.read_set.clear();
         self.write_set.clear();
         self.qsbr_guard.quiesce();
+        self.epoch_guard.refresh();
     }
 
     fn end_transaction(&mut self) {
+        self.epoch_guard.release();
         self.qsbr_guard.mark_as_offline();
         if self.garbage_bytes >= super::GC_THRESHOLD_BYTES {
             self.collect_garbage();
@@ -229,7 +237,7 @@ impl TransactionExecutor for Executor<'_> {
         Ok(())
     }
 
-    fn commit(&mut self, epoch_guard: &EpochGuard, logger: &Logger) -> Result<Epoch> {
+    fn commit(&mut self, logger: &Logger) -> Result<Epoch> {
         let mut log_capacity_reserver = logger.reserver();
         for item in &self.write_set {
             log_capacity_reserver.reserve_write(&item.key, item.value.as_deref());
@@ -273,7 +281,7 @@ impl TransactionExecutor for Executor<'_> {
         }
 
         // Serialization point
-        let current_epoch = epoch_guard.refresh();
+        let current_epoch = self.epoch_guard.refresh();
 
         // Phase 2: validation phase
         for item in &self.read_set {

@@ -8,8 +8,12 @@ use crate::{
     tid::{Tid, TidGenerator},
     Error, Index, Result, Shared,
 };
+use crossbeam_utils::Backoff;
 use scc::hash_index::Entry;
-use std::cell::{Cell, UnsafeCell};
+use std::{
+    cell::{Cell, UnsafeCell},
+    collections::VecDeque,
+};
 
 /// Pessimistic concurrency control.
 ///
@@ -31,12 +35,18 @@ impl ConcurrencyControlInternal for Pessimistic {
         }
     }
 
-    fn spawn_executor<'a>(&'a self, index: &'a Index<Self::Record>) -> Self::Executor<'a> {
+    fn spawn_executor<'a>(
+        &'a self,
+        index: &'a Index<Self::Record>,
+        epoch_guard: EpochGuard<'a>,
+    ) -> Self::Executor<'a> {
         Self::Executor {
             index,
             qsbr: &self.qsbr,
+            epoch_guard,
             tid_generator: Default::default(),
             qsbr_guard: self.qsbr.acquire(),
+            remove_queue: Default::default(),
             garbage_records: Default::default(),
             rw_set: Default::default(),
         }
@@ -74,8 +84,10 @@ pub struct Executor<'a> {
     qsbr: &'a Qsbr,
 
     // Per-executor state
+    epoch_guard: EpochGuard<'a>,
     tid_generator: TidGenerator,
     qsbr_guard: QsbrGuard<'a>,
+    remove_queue: VecDeque<(SmallBytes, Tid)>,
     garbage_records: Vec<Shared<Record>>,
 
     // Per-transaction state
@@ -86,11 +98,13 @@ impl TransactionExecutor for Executor<'_> {
     fn begin_transaction(&mut self) {
         self.rw_set.clear();
         self.qsbr_guard.quiesce();
+        self.epoch_guard.refresh();
     }
 
     fn end_transaction(&mut self) {
+        self.epoch_guard.release();
         self.qsbr_guard.mark_as_offline();
-
+        self.process_remove_queue();
         let garbage_bytes = self
             .garbage_records
             .len()
@@ -117,7 +131,8 @@ impl TransactionExecutor for Executor<'_> {
                 let item = RwItem {
                     key: key.into(),
                     record_ptr,
-                    kind: ItemKind::Read { was_occupied: true },
+                    was_vacant: false,
+                    kind: ItemKind::Read,
                 };
                 let value = unsafe { record.get() };
                 (item, value)
@@ -132,9 +147,8 @@ impl TransactionExecutor for Executor<'_> {
                 let item = RwItem {
                     key: key.into(),
                     record_ptr,
-                    kind: ItemKind::Read {
-                        was_occupied: false,
-                    },
+                    was_vacant: true,
+                    kind: ItemKind::Read,
                 };
                 (item, None)
             }
@@ -148,14 +162,15 @@ impl TransactionExecutor for Executor<'_> {
         if let Some(item) = item {
             let record = unsafe { item.record_ptr.as_ref() };
             match &item.kind {
-                ItemKind::Read { was_occupied } => {
-                    if *was_occupied {
+                ItemKind::Read => {
+                    if item.was_vacant {
+                        // We locked the record exclusively when we created it.
+                        assert!(record.lock.is_locked_exclusive());
+                    } else {
                         let Some(guard) = record.lock.try_upgrade() else {
                             return Err(Error::NotSerializable);
                         };
                         std::mem::forget(guard);
-                    } else {
-                        assert!(record.lock.is_locked_exclusive());
                     }
                     let value = value.map(|value| value.into());
                     let original_value = unsafe { record.replace(value) };
@@ -182,6 +197,7 @@ impl TransactionExecutor for Executor<'_> {
                 RwItem {
                     key: key.into(),
                     record_ptr,
+                    was_vacant: false,
                     kind: ItemKind::Write { original_value },
                 }
             }
@@ -196,6 +212,7 @@ impl TransactionExecutor for Executor<'_> {
                 RwItem {
                     key: key.into(),
                     record_ptr,
+                    was_vacant: true,
                     kind: ItemKind::Write {
                         original_value: None,
                     },
@@ -206,7 +223,7 @@ impl TransactionExecutor for Executor<'_> {
         Ok(())
     }
 
-    fn commit(&mut self, epoch_guard: &EpochGuard, logger: &Logger) -> Result<Epoch> {
+    fn commit(&mut self, logger: &Logger) -> Result<Epoch> {
         let mut tid_rw_set = self.tid_generator.begin_transaction();
         let mut log_capacity_reserver = logger.reserver();
         for item in &self.rw_set {
@@ -218,7 +235,7 @@ impl TransactionExecutor for Executor<'_> {
         }
         let reserved_log_capacity = log_capacity_reserver.finish();
 
-        let epoch = epoch_guard.refresh();
+        let epoch = self.epoch_guard.refresh();
         let commit_tid = tid_rw_set
             .generate_tid(epoch)
             .ok_or(Error::TooManyTransactions)?;
@@ -230,25 +247,16 @@ impl TransactionExecutor for Executor<'_> {
             if let ItemKind::Write { .. } = &item.kind {
                 log_entry.write(&item.key, value);
             }
-            if value.is_none() {
-                // The record is removed while being exclusively locked.
-                // This makes sure other transactions concurrently accessing
-                // the record abort, as we are using NO_WAIT deadlock
-                // prevention.
-                // This also applies to the record removal in abort().
-                assert!(record.lock.is_locked_exclusive());
-                self.index.remove(&item.key);
-                self.garbage_records.push(item.record_ptr);
-                continue;
-            }
             match item.kind {
-                ItemKind::Read { was_occupied } => {
-                    assert!(was_occupied);
-                    record.lock.force_unlock_read();
-                }
+                ItemKind::Read if item.was_vacant => record.lock.force_unlock_write(),
+                ItemKind::Read => record.lock.force_unlock_read(),
                 ItemKind::Write { .. } => {
                     record.tid.set(commit_tid);
+                    let should_remove = value.is_none();
                     record.lock.force_unlock_write();
+                    if should_remove {
+                        self.remove_queue.push_back((item.key.clone(), commit_tid));
+                    }
                 }
             }
         }
@@ -258,23 +266,20 @@ impl TransactionExecutor for Executor<'_> {
     fn abort(&mut self) {
         for item in self.rw_set.drain(..) {
             let record = unsafe { item.record_ptr.as_ref() };
+            if item.was_vacant {
+                // The record is removed while being exclusively locked.
+                // This makes sure other transactions concurrently accessing
+                // the record abort, as we are using NO_WAIT deadlock
+                // prevention.
+                // This also applies to the record removal in
+                // process_remove_queue().
+                assert!(record.lock.is_locked_exclusive());
+                self.index.remove(&item.key);
+                self.garbage_records.push(item.record_ptr);
+                continue;
+            }
             match item.kind {
-                ItemKind::Read {
-                    was_occupied: false,
-                } => {
-                    assert!(record.lock.is_locked_exclusive());
-                    assert!(unsafe { record.get() }.is_none());
-                    self.index.remove(&item.key);
-                    self.garbage_records.push(item.record_ptr);
-                }
-                ItemKind::Read { was_occupied: true } => record.lock.force_unlock_read(),
-                ItemKind::Write {
-                    original_value: None,
-                } => {
-                    assert!(record.lock.is_locked_exclusive());
-                    self.index.remove(&item.key);
-                    self.garbage_records.push(item.record_ptr);
-                }
+                ItemKind::Read => record.lock.force_unlock_read(),
                 ItemKind::Write { original_value } => {
                     unsafe { record.set(original_value) };
                     record.lock.force_unlock_write();
@@ -285,6 +290,26 @@ impl TransactionExecutor for Executor<'_> {
 }
 
 impl Executor<'_> {
+    fn process_remove_queue(&mut self) {
+        let reclamation_epoch = self.epoch_guard.reclamation_epoch();
+        while let Some((_, tid)) = self.remove_queue.front() {
+            if tid.epoch() > reclamation_epoch {
+                break;
+            }
+            let (key, tid) = self.remove_queue.pop_front().unwrap();
+            self.index.remove_if(&key, |record_ptr| {
+                let record = unsafe { record_ptr.as_ref() };
+                let guard = record.lock.write();
+                if record.tid.get() != tid {
+                    return false;
+                }
+                std::mem::forget(guard);
+                self.garbage_records.push(*record_ptr);
+                true
+            });
+        }
+    }
+
     fn collect_garbage(&mut self) {
         self.qsbr.sync();
         for record_ptr in self.garbage_records.drain(..) {
@@ -295,6 +320,11 @@ impl Executor<'_> {
 
 impl Drop for Executor<'_> {
     fn drop(&mut self) {
+        let backoff = Backoff::new();
+        while !self.remove_queue.is_empty() {
+            self.process_remove_queue();
+            backoff.snooze();
+        }
         if !self.garbage_records.is_empty() {
             self.collect_garbage();
         }
@@ -305,10 +335,11 @@ impl Drop for Executor<'_> {
 struct RwItem {
     key: SmallBytes,
     record_ptr: Shared<Record>,
+    was_vacant: bool,
     kind: ItemKind,
 }
 
 enum ItemKind {
-    Read { was_occupied: bool },
+    Read,
     Write { original_value: Option<SmallBytes> },
 }

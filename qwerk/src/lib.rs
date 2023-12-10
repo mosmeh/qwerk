@@ -12,7 +12,7 @@ pub use concurrency_control::{ConcurrencyControl, Optimistic, Pessimistic};
 pub use epoch::Epoch;
 
 use concurrency_control::TransactionExecutor;
-use epoch::{EpochFramework, EpochGuard};
+use epoch::EpochFramework;
 use log::{LogSystem, Logger};
 use scc::HashIndex;
 use shared::Shared;
@@ -59,9 +59,11 @@ impl<C: ConcurrencyControl> Database<C> {
     /// You usually should spawn one [`Worker`] per thread, and reuse the
     /// [`Worker`] for multiple transactions.
     pub fn spawn_worker(&self) -> Worker<C> {
+        let epoch_guard = self.epoch_fw.acquire();
         Worker {
-            txn_executor: self.concurrency_control.spawn_executor(&self.index),
-            epoch_guard: self.epoch_fw.acquire(),
+            txn_executor: self
+                .concurrency_control
+                .spawn_executor(&self.index, epoch_guard),
             logger: self.log_system.spawn_logger(),
         }
     }
@@ -94,7 +96,6 @@ impl<C: ConcurrencyControl> Drop for Database<C> {
 
 pub struct Worker<'a, C: ConcurrencyControl + 'a> {
     txn_executor: C::Executor<'a>,
-    epoch_guard: EpochGuard<'a>,
     logger: Logger<'a>,
 }
 
@@ -180,11 +181,7 @@ impl<C: ConcurrencyControl> Transaction<'_, '_, C> {
     ///
     /// [`get`]: #method.get
     pub fn commit(mut self) -> Result<Epoch> {
-        let epoch = self.try_mutate(|worker| {
-            worker
-                .txn_executor
-                .commit(&worker.epoch_guard, &worker.logger)
-        })?;
+        let epoch = self.try_mutate(|worker| worker.txn_executor.commit(&worker.logger))?;
         self.worker.txn_executor.end_transaction();
         self.is_active = false;
         Ok(epoch)
