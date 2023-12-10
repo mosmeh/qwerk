@@ -208,25 +208,27 @@ impl TransactionExecutor for Executor<'_> {
 
     fn commit(&mut self, epoch_guard: &EpochGuard, logger: &Logger) -> Result<Epoch> {
         let mut tid_rw_set = self.tid_generator.begin_transaction();
-        let mut reserver = logger.reserver();
+        let mut log_capacity_reserver = logger.reserver();
         for item in &self.rw_set {
             let record = unsafe { item.record_ptr.as_ref() };
             tid_rw_set.add(record.tid.get());
             if let ItemKind::Write { .. } = item.kind {
-                reserver.reserve_write(&item.key, unsafe { record.get() });
+                log_capacity_reserver.reserve_write(&item.key, unsafe { record.get() });
             }
         }
-        let reserved = reserver.finish();
+        let reserved_log_capacity = log_capacity_reserver.finish();
 
         let epoch = epoch_guard.refresh();
-        let new_tid = tid_rw_set.generate_tid(epoch);
+        let commit_tid = tid_rw_set
+            .generate_tid(epoch)
+            .ok_or(Error::TooManyTransactions)?;
 
-        let mut entry = reserved.insert(new_tid);
+        let mut log_entry = reserved_log_capacity.insert(commit_tid);
         for item in &self.rw_set {
             let record = unsafe { item.record_ptr.as_ref() };
             let value = unsafe { record.get() };
             if let ItemKind::Write { .. } = &item.kind {
-                entry.write(&item.key, value);
+                log_entry.write(&item.key, value);
             }
             if value.is_none() {
                 // The record is removed while being exclusively locked.
@@ -245,7 +247,7 @@ impl TransactionExecutor for Executor<'_> {
                     record.lock.force_unlock_read();
                 }
                 ItemKind::Write { .. } => {
-                    record.tid.set(new_tid);
+                    record.tid.set(commit_tid);
                     record.lock.force_unlock_write();
                 }
             }

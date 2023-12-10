@@ -23,8 +23,8 @@ mod repr {
 
 use repr::Repr;
 
-crate::assert_eq_size!(Repr, Box<[u8]>);
-crate::assert_eq_size!(Repr, Option<Repr>);
+static_assertions::assert_eq_size!(Repr, Box<[u8]>);
+static_assertions::assert_eq_size!(Repr, Option<Repr>);
 
 /// An owned, immutable sequence of bytes.
 #[derive(Clone)]

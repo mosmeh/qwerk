@@ -42,10 +42,11 @@ impl Tid {
         Self(((epoch.0 as u64) << EPOCH_SHIFT) | ((sequence as u64) << SEQUENCE_SHIFT))
     }
 
-    fn increment_sequence(self) -> Self {
+    /// Increments the sequence number.
+    /// Returns `None` if the sequence number overflows.
+    fn increment_sequence(self) -> Option<Self> {
         let new = Self(self.0 + (1 << SEQUENCE_SHIFT));
-        assert_eq!(new.epoch(), self.epoch()); // TODO: handle overflow
-        new
+        (new.epoch() == self.epoch()).then_some(new)
     }
 }
 
@@ -59,6 +60,11 @@ impl std::fmt::Debug for Tid {
             .finish()
     }
 }
+
+// TID should be the smallest number that is
+// (a) larger than the TID of any record read or written by the transaction,
+// (b) larger than the worker’s most recently chosen TID, and
+// (c) in the current global epoch.
 
 /// A generator of Silo-style TIDs.
 pub struct TidGenerator {
@@ -75,7 +81,6 @@ impl Default for TidGenerator {
 
 impl TidGenerator {
     pub fn begin_transaction(&mut self) -> TidRwSet {
-        // The new TID must be:
         // (b) larger than the worker’s most recently chosen TID
         let max_tid = self.last_tid;
         TidRwSet {
@@ -92,29 +97,29 @@ pub struct TidRwSet<'a> {
 }
 
 impl TidRwSet<'_> {
+    /// Adds a TID read or written by the transaction.
     pub fn add(&mut self, tid: Tid) {
-        // The new TID must be:
-        // (a) larger than the TID of any record read or written
-        //     by the transaction
+        // (a) larger than the TID of any record read or written by
+        //     the transaction
         self.max_tid = self.max_tid.max(tid.without_flags());
     }
 
-    pub fn generate_tid(self, epoch: Epoch) -> Tid {
+    /// Generates a commit TID for the transaction.
+    /// Returns `None` if the sequence number overflows.
+    pub fn generate_tid(self, epoch: Epoch) -> Option<Tid> {
         let epoch_of_max_tid = self.max_tid.epoch();
         assert!(epoch_of_max_tid <= epoch);
 
-        // The new TID must be:
         // (c) in the current global epoch
-        let mut new_tid = if epoch_of_max_tid == epoch {
-            self.max_tid
+        let new_tid = if epoch_of_max_tid == epoch {
+            self.max_tid.increment_sequence()?
         } else {
             Tid::from_epoch_and_sequence(epoch, 0)
         };
-        new_tid = new_tid.increment_sequence();
 
         assert!(!new_tid.has_flags());
         self.generator.last_tid = new_tid;
-        new_tid
+        Some(new_tid)
     }
 }
 
@@ -131,7 +136,7 @@ mod tests {
         assert_eq!(tid.flags(), 0);
         assert!(!tid.has_flags());
 
-        let tid = tid.increment_sequence();
+        let tid = tid.increment_sequence().unwrap();
         assert_eq!(tid.epoch(), Epoch(42));
         assert_eq!(tid.sequence(), 36);
         assert_eq!(tid.flags(), 0);
