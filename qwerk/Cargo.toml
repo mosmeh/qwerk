@@ -9,6 +9,7 @@ crossbeam-queue = "0.3.8"
 crossbeam-utils = "0.8.16"
 parking_lot = "0.12.1"
 scc = "2.0.5"
+static_assertions = "1.1.0"
 thiserror = "1.0.50"
 
 [dev-dependencies]

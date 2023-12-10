@@ -100,8 +100,7 @@ impl Record {
             let tid1 = Tid(self.tid.load(SeqCst));
             if tid1.is_absent() {
                 return RecordSnapshot {
-                    buf_ptr: std::ptr::null_mut(),
-                    len: 0,
+                    value: None,
                     tid: tid1,
                 };
             }
@@ -116,8 +115,7 @@ impl Record {
             let tid2 = Tid(self.tid.load(SeqCst));
             if tid1 == tid2 {
                 return RecordSnapshot {
-                    buf_ptr,
-                    len,
+                    value: Some(unsafe { std::slice::from_raw_parts(buf_ptr, len) }),
                     tid: tid2,
                 };
             }
@@ -126,9 +124,8 @@ impl Record {
     }
 }
 
-struct RecordSnapshot {
-    buf_ptr: *mut u8,
-    len: usize,
+struct RecordSnapshot<'a> {
+    value: Option<&'a [u8]>,
     tid: Tid,
 }
 
@@ -180,14 +177,14 @@ impl TransactionExecutor for Executor<'_> {
         let record_ptr = self.index.peek_with(&key, |_, value| *value);
         let item = match record_ptr {
             Some(record_ptr) => {
-                let RecordSnapshot { buf_ptr, len, tid } = unsafe { record_ptr.as_ref() }.read();
-                if buf_ptr.is_null() {
+                let RecordSnapshot { value, tid } = unsafe { record_ptr.as_ref() }.read();
+                if value.is_none() {
                     // The record was removed by another transaction.
                     return Err(Error::NotSerializable);
                 }
                 ReadItem {
                     key,
-                    value: Some(unsafe { std::slice::from_raw_parts(buf_ptr, len) }),
+                    value,
                     record_ptr: Some(record_ptr),
                     tid,
                 }
@@ -233,11 +230,11 @@ impl TransactionExecutor for Executor<'_> {
     }
 
     fn commit(&mut self, epoch_guard: &EpochGuard, logger: &Logger) -> Result<Epoch> {
-        let mut reserver = logger.reserver();
+        let mut log_capacity_reserver = logger.reserver();
         for item in &self.write_set {
-            reserver.reserve_write(&item.key, item.value.as_deref());
+            log_capacity_reserver.reserve_write(&item.key, item.value.as_deref());
         }
-        let reserved = reserver.finish();
+        let reserved_log_capacity = log_capacity_reserver.finish();
 
         // Phase 1
 
@@ -309,12 +306,14 @@ impl TransactionExecutor for Executor<'_> {
             tid_rw_set.add(tid);
         }
 
-        let new_tid = tid_rw_set.generate_tid(current_epoch);
+        let commit_tid = tid_rw_set
+            .generate_tid(current_epoch)
+            .ok_or(Error::TooManyTransactions)?;
 
         // Phase 3: write phase
-        let mut entry = reserved.insert(new_tid);
+        let mut log_entry = reserved_log_capacity.insert(commit_tid);
         for item in self.write_set.drain(..) {
-            entry.write(item.key.as_ref(), item.value.as_deref());
+            log_entry.write(item.key.as_ref(), item.value.as_deref());
 
             let record_ptr = *item
                 .record_ptr
@@ -333,7 +332,7 @@ impl TransactionExecutor for Executor<'_> {
             let prev_buf_ptr = record.buf_ptr.swap(new_buf_ptr, SeqCst);
             let prev_len = record.len.swap(new_len, SeqCst);
 
-            let mut new_record_tid = new_tid;
+            let mut new_record_tid = commit_tid;
             if new_buf_ptr.is_null() {
                 let was_removed = self.index.remove(&item.key);
                 assert!(was_removed);

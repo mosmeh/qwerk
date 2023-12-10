@@ -1,4 +1,4 @@
-crate::assert_eq_size!(usize, u64);
+static_assertions::assert_eq_size!(usize, u64);
 
 const MAX_INLINE_LEN: usize = 15;
 
@@ -14,7 +14,7 @@ pub struct Repr(
     Tag,
 );
 
-crate::assert_eq_size!(Repr, [u8; MAX_INLINE_LEN + 1]);
+static_assertions::assert_eq_size!(Repr, [u8; MAX_INLINE_LEN + 1]);
 
 unsafe impl Send for Repr {}
 unsafe impl Sync for Repr {}

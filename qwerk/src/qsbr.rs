@@ -42,6 +42,8 @@ impl Qsbr {
 ///
 /// While this guard is alive, the owner of this guard has to periodically
 /// declare that it is on a quiescent state by calling [`quiesce`].
+///
+/// [`quiesce`]: #method.quiesce
 pub struct QsbrGuard<'a> {
     qsbr: &'a Qsbr,
     local_counter: Slot<'a, CachePadded<AtomicU64>>,
@@ -61,6 +63,8 @@ impl QsbrGuard<'_> {
     ///
     /// Until the next call to [`quiesce`], the owner of this guard is not
     /// considered as a participant of QSBR.
+    ///
+    /// [`quiesce`]: #method.quiesce
     pub fn mark_as_offline(&self) {
         self.local_counter.store(u64::MAX, SeqCst);
     }

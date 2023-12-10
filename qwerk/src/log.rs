@@ -239,8 +239,8 @@ pub struct Logger<'a> {
 }
 
 impl Logger<'_> {
-    pub const fn reserver(&self) -> Reserver {
-        Reserver {
+    pub const fn reserver(&self) -> CapacityReserver {
+        CapacityReserver {
             logger: self,
             num_bytes: std::mem::size_of::<u64>() * 2, // tid and num_records
         }
@@ -251,12 +251,12 @@ impl Logger<'_> {
     }
 }
 
-pub struct Reserver<'a> {
+pub struct CapacityReserver<'a> {
     logger: &'a Logger<'a>,
     num_bytes: usize,
 }
 
-impl<'a> Reserver<'a> {
+impl<'a> CapacityReserver<'a> {
     pub fn reserve_write(&mut self, key: &[u8], value: Option<&[u8]>) {
         self.num_bytes += key.len() + std::mem::size_of::<u64>() * 2; // key, key.len(), and value.len()
         if let Some(value) = value {
@@ -468,7 +468,8 @@ impl LogChannel {
             );
 
             // TODO: Use write_vectored_all once it is stabilized.
-            match consumer.file.write_vectored(&slices) {
+            let result = consumer.file.write_vectored(&slices);
+            match result {
                 Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
                 Ok(n) => {
                     let mut num_bufs_to_remove = 0;

@@ -24,6 +24,10 @@ pub enum Error {
     #[error("serialization failure")]
     NotSerializable,
 
+    /// Too many transactions in a single epoch.
+    #[error("too many transactions in a single epoch")]
+    TooManyTransactions,
+
     /// Attempted to perform an operation on an aborted transaction.
     #[error("attempted to perform an operation on the aborted transaction")]
     AlreadyAborted,
@@ -70,7 +74,8 @@ impl<C: ConcurrencyControl> Database<C> {
         self.log_system.durable_epoch()
     }
 
-    /// Persists the changes made by all committed transactions to the disk.
+    /// Makes sure the changes made by all committed transactions are persisted
+    /// to the disk.
     pub fn flush(&self) -> std::io::Result<()> {
         self.log_system.flush()
     }
@@ -92,6 +97,9 @@ pub struct Worker<'a, C: ConcurrencyControl + 'a> {
     epoch_guard: EpochGuard<'a>,
     logger: Logger<'a>,
 }
+
+static_assertions::assert_not_impl_any!(Worker<'_, Pessimistic>: Send, Sync);
+static_assertions::assert_not_impl_any!(Worker<'_, Optimistic>: Send, Sync);
 
 impl<'db, C: ConcurrencyControl> Worker<'db, C> {
     /// Begins a new transaction.
@@ -221,13 +229,3 @@ impl<C: ConcurrencyControl> Drop for Transaction<'_, '_, C> {
         self.do_abort()
     }
 }
-
-macro_rules! assert_eq_size {
-    ($x:ty, $y:ty) => {
-        const _: fn() = || {
-            let _ = std::mem::transmute::<$x, $y>;
-        };
-    };
-}
-
-pub(crate) use assert_eq_size;
