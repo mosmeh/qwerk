@@ -249,7 +249,7 @@ impl TransactionExecutor for Executor<'_> {
         // The stability of the sort doesn't matter because the keys are unique.
         self.write_set.sort_unstable_by(|a, b| a.key.cmp(&b.key));
 
-        let mut tid_rw_set = self.tid_generator.begin_transaction();
+        let mut tid_set = self.tid_generator.begin_transaction();
         for item in &mut self.write_set {
             let mut was_occupied = false;
             let record_ptr = match self.index.entry(item.key.clone()) {
@@ -273,7 +273,7 @@ impl TransactionExecutor for Executor<'_> {
                     // The record was removed by another transaction.
                     return Err(Error::NotSerializable);
                 }
-                tid_rw_set.add(tid);
+                tid_set.add(tid);
             }
             item.record_ptr
                 .set(record_ptr)
@@ -311,10 +311,10 @@ impl TransactionExecutor for Executor<'_> {
             }
             assert!(!tid.is_absent());
 
-            tid_rw_set.add(tid);
+            tid_set.add(tid);
         }
 
-        let commit_tid = tid_rw_set
+        let commit_tid = tid_set
             .generate_tid(current_epoch)
             .ok_or(Error::TooManyTransactions)?;
 
