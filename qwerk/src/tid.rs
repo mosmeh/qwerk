@@ -80,10 +80,10 @@ impl Default for TidGenerator {
 }
 
 impl TidGenerator {
-    pub fn begin_transaction(&mut self) -> TidRwSet {
+    pub fn begin_transaction(&mut self) -> TidSet {
         // (b) larger than the worker’s most recently chosen TID
         let max_tid = self.last_tid;
-        TidRwSet {
+        TidSet {
             generator: self,
             max_tid,
         }
@@ -91,12 +91,12 @@ impl TidGenerator {
 }
 
 /// A set of TIDs read or written by a transaction.
-pub struct TidRwSet<'a> {
+pub struct TidSet<'a> {
     generator: &'a mut TidGenerator,
     max_tid: Tid,
 }
 
-impl TidRwSet<'_> {
+impl TidSet<'_> {
     /// Adds a TID read or written by the transaction.
     pub fn add(&mut self, tid: Tid) {
         // (a) larger than the TID of any record read or written by

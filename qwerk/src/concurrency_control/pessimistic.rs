@@ -224,11 +224,11 @@ impl TransactionExecutor for Executor<'_> {
     }
 
     fn commit(&mut self, logger: &Logger) -> Result<Epoch> {
-        let mut tid_rw_set = self.tid_generator.begin_transaction();
+        let mut tid_set = self.tid_generator.begin_transaction();
         let mut log_capacity_reserver = logger.reserver();
         for item in &self.rw_set {
             let record = unsafe { item.record_ptr.as_ref() };
-            tid_rw_set.add(record.tid.get());
+            tid_set.add(record.tid.get());
             if let ItemKind::Write { .. } = item.kind {
                 log_capacity_reserver.reserve_write(&item.key, unsafe { record.get() });
             }
@@ -236,7 +236,7 @@ impl TransactionExecutor for Executor<'_> {
         let reserved_log_capacity = log_capacity_reserver.finish();
 
         let epoch = self.epoch_guard.refresh();
-        let commit_tid = tid_rw_set
+        let commit_tid = tid_set
             .generate_tid(epoch)
             .ok_or(Error::TooManyTransactions)?;
 
