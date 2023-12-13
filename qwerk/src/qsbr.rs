@@ -5,6 +5,8 @@ use crate::slotted_cell::{Slot, SlottedCell};
 use crossbeam_utils::{Backoff, CachePadded};
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
+const OFFLINE_COUNTER: u64 = u64::MAX;
+
 /// Quiescent state-based reclamation
 #[derive(Default)]
 pub struct Qsbr {
@@ -14,19 +16,17 @@ pub struct Qsbr {
 
 impl Qsbr {
     pub fn acquire(&self) -> QsbrGuard {
-        let guard = QsbrGuard {
+        QsbrGuard {
             qsbr: self,
-            local_counter: self.local_counters.alloc(),
-        };
-        guard.quiesce();
-        guard
+            local_counter: self
+                .local_counters
+                .alloc_with(|_| AtomicU64::new(OFFLINE_COUNTER).into()),
+        }
     }
 
     /// Waits until all owners of [`QsbrGuard`]s `acquire`d from this [`Qsbr`]
     /// experience quiescent states at least once.
-    ///
-    /// Returns a lower bound of the counter value seen by all [`QsbrGuard`]s.
-    pub fn sync(&self) -> u64 {
+    pub fn sync(&self) {
         let counter = self.global_counter.fetch_add(1, SeqCst) + 1;
         for local_counter in self.local_counters.iter() {
             let backoff = Backoff::new();
@@ -34,7 +34,6 @@ impl Qsbr {
                 backoff.snooze();
             }
         }
-        counter
     }
 }
 
@@ -51,12 +50,9 @@ pub struct QsbrGuard<'a> {
 
 impl QsbrGuard<'_> {
     /// Declares that the owner of this guard is on a quiescent state.
-    ///
-    /// Returns the current global counter.
-    pub fn quiesce(&self) -> u64 {
+    pub fn quiesce(&self) {
         let counter = self.qsbr.global_counter.load(SeqCst);
         self.local_counter.store(counter, SeqCst);
-        counter
     }
 
     /// Temporarily marks the owner of this guard as not participating in QSBR.
@@ -66,7 +62,11 @@ impl QsbrGuard<'_> {
     ///
     /// [`quiesce`]: #method.quiesce
     pub fn mark_as_offline(&self) {
-        self.local_counter.store(u64::MAX, SeqCst);
+        self.local_counter.store(OFFLINE_COUNTER, SeqCst);
+    }
+
+    pub fn is_online(&self) -> bool {
+        self.local_counter.load(SeqCst) != OFFLINE_COUNTER
     }
 }
 
