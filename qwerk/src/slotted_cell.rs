@@ -55,6 +55,7 @@ impl<T> SlottedCell<T> {
 
     /// Allocates a slot in the cell, initializing it with a default value if
     /// the slot was empty.
+    #[allow(dead_code)]
     pub fn alloc(&self) -> Slot<T>
     where
         T: Default,
