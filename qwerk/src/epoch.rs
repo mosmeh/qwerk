@@ -14,20 +14,51 @@ use std::{
     time::Duration,
 };
 
+// All local_epochs are either global_epoch or global_epoch - 1.
+// Thus global_epoch - 2 is the reclamation epoch.
+const RECLAMATION_EPOCH_OFFSET: u32 = 2;
+
+const OFFLINE_EPOCH: u32 = u32::MAX;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Epoch(pub u32);
+
+impl Epoch {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn increment(self) -> Self {
+        Self(self.0 + 1)
+    }
+}
+
+pub struct Config {
+    pub initial_epoch: Epoch,
+    pub epoch_duration: Duration,
+}
 
 pub struct EpochFramework {
     shared: Arc<SharedState>,
     epoch_bumper: Option<JoinHandle<()>>,
 }
 
+impl Default for EpochFramework {
+    fn default() -> Self {
+        Self::new(Config {
+            initial_epoch: Epoch::ZERO,
+            epoch_duration: Duration::from_millis(40), // Default in the Silo paper (Tu et al. 2013).
+        })
+    }
+}
+
 impl EpochFramework {
-    pub fn with_epoch_duration(epoch_duration: Duration) -> Self {
-        // > 2 to make sure (reclamation epoch) = epoch - 2 > 0
-        const INITIAL_EPOCH: u32 = 3;
+    pub fn new(config: Config) -> Self {
+        // Ensure that reclamation_epoch > 0
+        let initial_epoch = config
+            .initial_epoch
+            .max(Epoch(RECLAMATION_EPOCH_OFFSET + 1));
+
         let shared = Arc::new(SharedState {
-            global_epoch: INITIAL_EPOCH.into(),
+            global_epoch: initial_epoch.0.into(),
             local_epochs: Default::default(),
             is_running: true.into(),
         });
@@ -36,7 +67,7 @@ impl EpochFramework {
             std::thread::Builder::new()
                 .name("epoch_bumper".into())
                 .spawn(move || {
-                    let mut global_epoch = INITIAL_EPOCH;
+                    let mut global_epoch = initial_epoch.0;
                     while shared.is_running.load(SeqCst) {
                         for local_epoch in shared.local_epochs.iter() {
                             let backoff = Backoff::new();
@@ -45,11 +76,12 @@ impl EpochFramework {
                             }
                         }
                         global_epoch = shared.global_epoch.fetch_add(1, SeqCst) + 1;
-                        std::thread::sleep(epoch_duration);
+                        std::thread::sleep(config.epoch_duration);
                     }
                 })
                 .unwrap()
         };
+
         Self {
             shared,
             epoch_bumper: Some(epoch_bumper),
@@ -57,18 +89,13 @@ impl EpochFramework {
     }
 
     pub fn acquire(&self) -> EpochGuard {
-        let guard = EpochGuard {
+        EpochGuard {
             global_epoch: &self.shared.global_epoch,
-            local_epoch: self.shared.local_epochs.alloc(),
-        };
-        guard.refresh();
-        guard
-    }
-}
-
-impl Default for EpochFramework {
-    fn default() -> Self {
-        Self::with_epoch_duration(Duration::from_millis(40))
+            local_epoch: self
+                .shared
+                .local_epochs
+                .alloc_with(|_| AtomicU32::new(OFFLINE_EPOCH).into()),
+        }
     }
 }
 
@@ -108,17 +135,15 @@ impl EpochGuard<'_> {
     ///
     /// [`refresh`]: #method.refresh
     pub fn release(&self) {
-        self.local_epoch.store(u32::MAX, SeqCst);
+        self.local_epoch.store(OFFLINE_EPOCH, SeqCst);
     }
 
     /// Returns the reclamation epoch.
     ///
-    /// The reclamation epoch is the epoch up to which all the resources freed
-    /// in the epoch are guaranteed to be no longer used.
+    /// The reclamation epoch is the largest epoch that no participant of the
+    /// epoch framework is currently in.
     pub fn reclamation_epoch(&self) -> Epoch {
-        // All local_epochs are either global_epoch or global_epoch - 1.
-        // Therefore, reclamation_epoch >= self.local_epoch - 2.
-        Epoch(self.local_epoch.load(SeqCst) - 2)
+        Epoch(self.global_epoch.load(SeqCst) - RECLAMATION_EPOCH_OFFSET)
     }
 }
 
