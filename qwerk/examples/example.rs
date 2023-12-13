@@ -68,8 +68,9 @@ fn run<C: ConcurrencyControl>() -> Result<()> {
     txn.insert(b"carol", b"quux")?;
     let commit_epoch2 = txn.commit()?;
 
+    assert!(commit_epoch1 <= commit_epoch2);
+
     db.flush()?;
-    assert!(db.durable_epoch() >= commit_epoch1);
     assert!(db.durable_epoch() >= commit_epoch2);
 
     Ok(())
