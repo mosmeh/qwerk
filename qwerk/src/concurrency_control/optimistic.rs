@@ -396,7 +396,7 @@ impl Executor<'_> {
         self.qsbr.sync();
         self.garbage_values.clear();
         for record_ptr in self.garbage_records.drain(..) {
-            let _ = unsafe { Shared::into_box(record_ptr) };
+            unsafe { record_ptr.drop_in_place() };
         }
         self.garbage_bytes = 0;
     }

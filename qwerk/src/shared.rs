@@ -4,6 +4,12 @@ use std::ptr::NonNull;
 /// a heap-allocated shared object.
 pub struct Shared<T>(NonNull<T>);
 
+impl<T> std::fmt::Debug for Shared<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Shared").field(&self.0).finish()
+    }
+}
+
 impl<T> Clone for Shared<T> {
     fn clone(&self) -> Self {
         *self
@@ -26,12 +32,11 @@ impl<T> Shared<T> {
         Self(Box::leak(Box::new(value)).into())
     }
 
-    #[must_use]
-    pub unsafe fn into_box(this: Self) -> Box<T> {
-        Box::from_raw(this.0.as_ptr())
+    pub unsafe fn drop_in_place(self) {
+        let _ = Box::from_raw(self.0.as_ptr());
     }
 
-    pub const unsafe fn as_ref<'a>(&self) -> &'a T {
+    pub const unsafe fn as_ref<'a>(self) -> &'a T {
         self.0.as_ref()
     }
 }

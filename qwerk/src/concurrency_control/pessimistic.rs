@@ -313,7 +313,7 @@ impl Executor<'_> {
     fn collect_garbage(&mut self) {
         self.qsbr.sync();
         for record_ptr in self.garbage_records.drain(..) {
-            let _ = unsafe { Shared::into_box(record_ptr) };
+            unsafe { record_ptr.drop_in_place() };
         }
     }
 }

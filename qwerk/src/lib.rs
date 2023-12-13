@@ -89,7 +89,7 @@ impl<C: ConcurrencyControl> Drop for Database<C> {
         for (_, record_ptr) in self.index.iter(&guard) {
             // SAFETY: Since we have &mut self, all Executors have already been
             //         dropped, so no one is holding record pointers now.
-            let _ = unsafe { Shared::into_box(*record_ptr) };
+            unsafe { record_ptr.drop_in_place() };
         }
     }
 }
