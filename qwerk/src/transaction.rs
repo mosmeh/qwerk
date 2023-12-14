@@ -72,7 +72,7 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
     ///
     /// [`get`]: #method.get
     pub fn commit(mut self) -> Result<Epoch> {
-        let epoch = self.try_mutate(|worker| worker.txn_executor.commit(&worker.logger))?;
+        let epoch = self.try_mutate(|worker| worker.txn_executor.commit(&worker.log_writer))?;
         self.worker.txn_executor.end_transaction();
         self.is_active = false;
         Ok(epoch)

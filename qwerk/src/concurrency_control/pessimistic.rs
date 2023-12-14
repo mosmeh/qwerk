@@ -2,8 +2,9 @@ use super::{ConcurrencyControl, ConcurrencyControlInternal, TransactionExecutor}
 use crate::{
     epoch::{Epoch, EpochGuard},
     lock::Lock,
-    log::Logger,
+    persistence::LogWriter,
     qsbr::{Qsbr, QsbrGuard},
+    record,
     small_bytes::SmallBytes,
     tid::{Tid, TidGenerator},
     Error, Index, Result, Shared,
@@ -12,6 +13,7 @@ use crossbeam_utils::Backoff;
 use scc::hash_index::Entry;
 use std::{
     cell::{Cell, UnsafeCell},
+    cmp::Ordering,
     collections::VecDeque,
 };
 
@@ -34,6 +36,38 @@ impl ConcurrencyControlInternal for Pessimistic {
         Self {
             qsbr: Default::default(),
             gc_threshold,
+        }
+    }
+
+    fn load_log_entry(
+        index: &Index<Self::Record>,
+        key: SmallBytes,
+        value: Option<Box<[u8]>>,
+        tid: Tid,
+    ) {
+        match index.entry(key) {
+            Entry::Occupied(entry) => {
+                let record_ptr = *entry.get();
+                let record = unsafe { record_ptr.as_ref() };
+                let _guard = record.lock.write();
+                match record.tid.get().cmp(&tid) {
+                    Ordering::Less => {
+                        let value = value.map(|value| value.into());
+                        unsafe { record.set(value) };
+                        record.tid.set(tid);
+                    }
+                    Ordering::Equal => unreachable!(),
+                    Ordering::Greater => (),
+                }
+            }
+            Entry::Vacant(entry) => {
+                let record_ptr = Shared::new(Record {
+                    value: value.map(|value| value.into()).into(),
+                    tid: tid.into(),
+                    lock: Lock::new_unlocked(),
+                });
+                entry.insert_entry(record_ptr);
+            }
         }
     }
 
@@ -77,6 +111,13 @@ impl Record {
     unsafe fn replace(&self, value: Option<SmallBytes>) -> Option<SmallBytes> {
         assert!(self.lock.is_locked_exclusive());
         std::mem::replace(&mut *self.value.get(), value)
+    }
+}
+
+impl record::Record for Record {
+    fn is_tombstone(&self) -> bool {
+        let _guard = self.lock.read();
+        unsafe { self.get() }.is_none()
     }
 }
 
@@ -225,9 +266,9 @@ impl TransactionExecutor for Executor<'_> {
         Ok(())
     }
 
-    fn commit(&mut self, logger: &Logger) -> Result<Epoch> {
+    fn commit(&mut self, log_writer: &LogWriter) -> Result<Epoch> {
         let mut tid_set = self.tid_generator.begin_transaction();
-        let mut log_capacity_reserver = logger.reserver();
+        let mut log_capacity_reserver = log_writer.reserver();
         for item in &self.rw_set {
             let record = unsafe { item.record_ptr.as_ref() };
             tid_set.add(record.tid.get());
@@ -320,7 +361,7 @@ impl Executor<'_> {
 
     fn collect_garbage(&mut self) {
         assert!(!self.qsbr_guard.is_online());
-        self.qsbr.sync();
+        self.global.qsbr.sync();
         for record_ptr in self.garbage_records.drain(..) {
             unsafe { record_ptr.drop_in_place() };
         }

@@ -1,8 +1,9 @@
 use super::{ConcurrencyControl, ConcurrencyControlInternal, Shared, TransactionExecutor};
 use crate::{
     epoch::{Epoch, EpochGuard},
-    log::Logger,
+    persistence::LogWriter,
     qsbr::{Qsbr, QsbrGuard},
+    record,
     small_bytes::SmallBytes,
     tid::{Tid, TidGenerator},
     Error, Index, Result,
@@ -11,6 +12,7 @@ use crossbeam_utils::Backoff;
 use scc::hash_index::Entry;
 use std::{
     cell::OnceCell,
+    cmp::Ordering,
     collections::VecDeque,
     sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::SeqCst},
 };
@@ -33,6 +35,44 @@ impl ConcurrencyControlInternal for Optimistic {
         Self {
             qsbr: Default::default(),
             gc_threshold,
+        }
+    }
+
+    fn load_log_entry(
+        index: &Index<Self::Record>,
+        key: SmallBytes,
+        value: Option<Box<[u8]>>,
+        tid: Tid,
+    ) {
+        assert!(!tid.has_flags());
+        match index.entry(key) {
+            Entry::Occupied(entry) => {
+                let record_ptr = *entry.get();
+                let record = unsafe { record_ptr.as_ref() };
+                let record_tid = record
+                    .lock_if_present()
+                    .expect("the record must be present");
+                assert!(!record_tid.has_flags());
+                match record_tid.cmp(&tid) {
+                    Ordering::Less => {
+                        let (buf_ptr, len) = value.into_raw_parts();
+                        record.buf_ptr.store(buf_ptr, SeqCst);
+                        record.len.store(len, SeqCst);
+                        record.tid.store(tid.0, SeqCst); // unlock
+                    }
+                    Ordering::Equal => unreachable!(),
+                    Ordering::Greater => record.unlock(),
+                }
+            }
+            Entry::Vacant(entry) => {
+                let (buf_ptr, len) = value.into_raw_parts();
+                let record_ptr = Shared::new(Record {
+                    buf_ptr: AtomicPtr::new(buf_ptr),
+                    len: len.into(),
+                    tid: tid.0.into(),
+                });
+                entry.insert_entry(record_ptr);
+            }
         }
     }
 
@@ -139,6 +179,12 @@ impl Record {
             }
             backoff.spin();
         }
+    }
+}
+
+impl record::Record for Record {
+    fn is_tombstone(&self) -> bool {
+        self.buf_ptr.load(SeqCst).is_null()
     }
 }
 
@@ -252,8 +298,8 @@ impl TransactionExecutor for Executor<'_> {
         Ok(())
     }
 
-    fn commit(&mut self, logger: &Logger) -> Result<Epoch> {
-        let mut log_capacity_reserver = logger.reserver();
+    fn commit(&mut self, log_writer: &LogWriter) -> Result<Epoch> {
+        let mut log_capacity_reserver = log_writer.reserver();
         for item in &self.write_set {
             log_capacity_reserver.reserve_write(&item.key, item.value.as_deref());
         }
