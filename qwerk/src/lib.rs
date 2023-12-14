@@ -1,9 +1,8 @@
 mod concurrency_control;
 mod epoch;
 mod lock;
-mod log;
+mod persistence;
 mod qsbr;
-mod recovery;
 mod shared;
 mod slotted_cell;
 mod small_bytes;
@@ -16,7 +15,7 @@ pub use transaction::Transaction;
 
 use concurrency_control::TransactionExecutor;
 use epoch::EpochFramework;
-use log::{LogSystem, Logger};
+use persistence::{DurableEpoch, LogWriter, Logger, LoggerConfig};
 use scc::HashIndex;
 use shared::Shared;
 use small_bytes::SmallBytes;
@@ -24,8 +23,8 @@ use std::{path::Path, time::Duration};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// Serialization failure.
-    #[error("serialization failure")]
+    /// Serialization of a transaction failed.
+    #[error("serilization of the transaction failed")]
     NotSerializable,
 
     /// Too many transactions in a single epoch.
@@ -87,28 +86,31 @@ impl DatabaseOptions {
             return Err(Error::Corrupted);
         }
 
+        let durable_epoch = DurableEpoch::new(dir)?.get();
+        let index = persistence::recover::<C>(dir, durable_epoch, self.background_threads)?;
+
         let epoch_fw = EpochFramework::new(epoch::Config {
-            initial_epoch: Epoch::ZERO,
+            initial_epoch: durable_epoch.increment(),
             epoch_duration: self.epoch_duration,
         });
-        let log_system = LogSystem::new(log::Config {
+        let logger = Logger::new(LoggerConfig {
             dir: dir.to_path_buf(),
             flushing_threads: self.background_threads,
             preallocated_buffer_size: self.log_buffer_size_bytes,
-            buffers_per_logger: self.log_buffers_per_worker,
+            buffers_per_writer: self.log_buffers_per_worker,
             fsync: self.fsync,
         })?;
         let concurrency_control = C::init(self.gc_threshold);
 
         Ok(Database {
-            index: Default::default(),
+            index,
             concurrency_control,
             epoch_fw,
-            log_system,
+            logger,
         })
     }
 
-    /// The number of background threads used for logging.
+    /// The number of background threads used for logging and recovery.
     /// Defaults to the smaller of the number of CPU cores and 4.
     pub const fn background_threads(mut self, n: usize) -> Self {
         self.background_threads = n;
@@ -121,8 +123,9 @@ impl DatabaseOptions {
         self
     }
 
-    /// Workers perform garbage collection of removed records when this number
-    /// of bytes of garbage is accumulated. Defaults to 4 KiB.
+    /// Workers perform garbage collection of removed records and old versions
+    /// of record values when this number of bytes of garbage is accumulated.
+    /// Defaults to 4 KiB.
     pub const fn gc_threshold(mut self, bytes: usize) -> Self {
         self.gc_threshold = bytes;
         self
@@ -150,11 +153,17 @@ impl DatabaseOptions {
 
 type Index<T> = HashIndex<SmallBytes, Shared<T>>;
 
+mod record {
+    pub trait Record: Send + Sync + 'static {
+        fn is_tombstone(&self) -> bool;
+    }
+}
+
 pub struct Database<C: ConcurrencyControl> {
     index: Index<C::Record>,
     concurrency_control: C,
     epoch_fw: EpochFramework,
-    log_system: LogSystem,
+    logger: Logger,
 }
 
 impl<C: ConcurrencyControl> Database<C> {
@@ -173,7 +182,7 @@ impl<C: ConcurrencyControl> Database<C> {
             txn_executor: self
                 .concurrency_control
                 .spawn_executor(&self.index, epoch_guard),
-            logger: self.log_system.spawn_logger(),
+            log_writer: self.logger.spawn_writer(),
         }
     }
 
@@ -182,13 +191,13 @@ impl<C: ConcurrencyControl> Database<C> {
     /// The durable epoch is the epoch up to which all changes made by
     /// committed transactions are guaranteed to be durable.
     pub fn durable_epoch(&self) -> Epoch {
-        self.log_system.durable_epoch()
+        self.logger.durable_epoch()
     }
 
     /// Makes sure the changes made by all committed transactions are persisted
     /// to the disk.
     pub fn flush(&self) -> std::io::Result<()> {
-        self.log_system.flush()
+        self.logger.flush()
     }
 }
 
@@ -205,7 +214,7 @@ impl<C: ConcurrencyControl> Drop for Database<C> {
 
 pub struct Worker<'a, C: ConcurrencyControl + 'a> {
     txn_executor: C::Executor<'a>,
-    logger: Logger<'a>,
+    log_writer: LogWriter<'a>,
 }
 
 static_assertions::assert_not_impl_any!(Worker<'_, Pessimistic>: Send, Sync);

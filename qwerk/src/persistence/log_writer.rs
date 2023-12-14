@@ -24,12 +24,12 @@ pub struct Config {
     pub dir: PathBuf,
     pub flushing_threads: usize,
     pub preallocated_buffer_size: usize,
-    pub buffers_per_logger: usize,
+    pub buffers_per_writer: usize,
     pub fsync: bool,
 }
 
-/// A redo logging system.
-pub struct LogSystem {
+/// A redo logger.
+pub struct Logger {
     config: Arc<Config>,
     channels: Arc<SlottedCell<LogChannel>>,
     durable_epoch: Arc<DurableEpoch>,
@@ -39,7 +39,7 @@ pub struct LogSystem {
     is_running: Arc<AtomicBool>,
 }
 
-impl LogSystem {
+impl Logger {
     pub fn new(config: Config) -> Result<Self> {
         DirBuilder::new().recursive(true).create(&config.dir)?;
 
@@ -56,7 +56,7 @@ impl LogSystem {
                 let flush_req_rx = flush_req_rx.clone();
                 std::thread::spawn(move || {
                     while let Ok(req) = flush_req_rx.recv() {
-                        channels.get(req.logger_id).unwrap().flush().unwrap();
+                        channels.get(req.writer_id).unwrap().flush().unwrap();
                     }
                 })
             })
@@ -86,11 +86,11 @@ impl LogSystem {
         })
     }
 
-    pub fn spawn_logger(&self) -> Logger {
-        Logger {
+    pub fn spawn_writer(&self) -> LogWriter {
+        LogWriter {
             channel: self
                 .channels
-                .alloc_with(|logger_id| LogChannel::new(logger_id, self.config.clone())),
+                .alloc_with(|writer_id| LogChannel::new(writer_id, self.config.clone())),
             flush_req_tx: self.flush_req_tx.clone().unwrap(),
         }
     }
@@ -122,7 +122,7 @@ impl LogSystem {
     }
 }
 
-impl Drop for LogSystem {
+impl Drop for Logger {
     fn drop(&mut self) {
         self.is_running.store(false, SeqCst);
         self.flush_req_tx.take().unwrap();
@@ -140,7 +140,7 @@ impl Drop for LogSystem {
 //    transactions, and in such case the current_buf will never be queued.
 //    The daemon ensures that the current_buf is queued at some point.
 // 2. It periodically updates the durable epoch by calculating the minimum
-//    durable epoch of all loggers.
+//    durable epoch of all writers.
 fn run_daemon(
     channels: &SlottedCell<LogChannel>,
     durable_epoch: &DurableEpoch,
@@ -149,8 +149,8 @@ fn run_daemon(
 ) {
     while is_running.load(SeqCst) {
         for channel in channels.iter() {
-            // Failure of this lock means that a logger is writing to
-            // the buffer. In that case we can just let the logger
+            // Failure of this lock means that a writer is writing to
+            // the buffer. In that case we can just let the writer
             // queue the buffer by itself if needed.
             let Some(mut producer) = channel.producer.try_lock() else {
                 continue;
@@ -169,7 +169,7 @@ fn run_daemon(
     }
 }
 
-struct DurableEpoch {
+pub struct DurableEpoch {
     path: PathBuf,
     tmp_path: PathBuf,
     epoch: AtomicU32,
@@ -177,7 +177,7 @@ struct DurableEpoch {
 }
 
 impl DurableEpoch {
-    fn new(dir: &Path) -> Result<Self> {
+    pub fn new(dir: &Path) -> Result<Self> {
         let path = dir.join("durable_epoch");
         let epoch = match std::fs::read(&path) {
             Ok(bytes) => {
@@ -195,7 +195,7 @@ impl DurableEpoch {
         })
     }
 
-    fn get(&self) -> Epoch {
+    pub fn get(&self) -> Epoch {
         Epoch(self.epoch.load(SeqCst))
     }
 
@@ -205,9 +205,9 @@ impl DurableEpoch {
         let mut min_epoch = None;
         for channel in channels.iter() {
             let Some(durable_epoch) = channel.durable_epoch() else {
-                // This logger has not flushed anything yet.
+                // This channel has not flushed anything yet.
                 // We would underestimate the durable epoch if we skip
-                // this logger, so we don't update the durable epoch.
+                // this channel, so we don't update the durable epoch.
                 return Ok(());
             };
             match min_epoch {
@@ -237,28 +237,28 @@ impl DurableEpoch {
 }
 
 struct FlushRequest {
-    logger_id: usize,
+    writer_id: usize,
 }
 
-// Architecture (single logger/channel):
-//                                            +---- flush_req ----+
-//                                            |                   |
-//                                            |                   v
-//                      write               queue               flush
-// TransactionExecutor ------> current_buf ------> flush_queue ------> file
-//                                  ^                    |        |
-//                                  |                    |        v
-//                                  +---- free_bufs <----+   durable_epoch
+// Architecture (single writer/channel):
+//                                  +---- flush_req ----+
+//                                  |                   |
+//                                  |                   v
+//            write               queue               flush
+// LogWriter ------> current_buf ------> flush_queue ------> file
+//                        ^                    |        |
+//                        |                    |        v
+//                        +---- free_bufs <----+   durable_epoch
 
-pub struct Logger<'a> {
+pub struct LogWriter<'a> {
     channel: Slot<'a, LogChannel>,
     flush_req_tx: Sender<FlushRequest>,
 }
 
-impl Logger<'_> {
+impl LogWriter<'_> {
     pub const fn reserver(&self) -> CapacityReserver {
         CapacityReserver {
-            logger: self,
+            writer: self,
             num_bytes: std::mem::size_of::<u64>() * 2, // tid and num_records
         }
     }
@@ -269,7 +269,7 @@ impl Logger<'_> {
 }
 
 pub struct CapacityReserver<'a> {
-    logger: &'a Logger<'a>,
+    writer: &'a LogWriter<'a>,
     num_bytes: usize,
 }
 
@@ -282,15 +282,15 @@ impl<'a> CapacityReserver<'a> {
     }
 
     pub fn finish(self) -> ReservedCapacity<'a> {
-        let size = self.logger.channel.config.preallocated_buffer_size;
-        let mut producer = self.logger.channel.producer.lock();
+        let size = self.writer.channel.config.preallocated_buffer_size;
+        let mut producer = self.writer.channel.producer.lock();
         if producer
             .current_buf
             .as_ref()
             .map(|buf| !buf.bytes.is_empty() && buf.bytes.len() + self.num_bytes > size)
             .unwrap_or_default()
         {
-            self.logger.queue(producer.current_buf.take().unwrap());
+            self.writer.queue(producer.current_buf.take().unwrap());
         }
 
         if producer.current_buf.is_none() {
@@ -309,14 +309,14 @@ impl<'a> CapacityReserver<'a> {
             .reserve(self.num_bytes);
 
         ReservedCapacity {
-            logger: self.logger,
+            writer: self.writer,
             buf: MutexGuard::map(producer, |producer| &mut producer.current_buf),
         }
     }
 }
 
 pub struct ReservedCapacity<'a> {
-    logger: &'a Logger<'a>,
+    writer: &'a LogWriter<'a>,
     buf: MappedMutexGuard<'a, Option<LogBuf>>,
 }
 
@@ -334,7 +334,7 @@ impl<'a> ReservedCapacity<'a> {
         assert!(min_epoch <= epoch);
 
         Entry {
-            logger: self.logger,
+            writer: self.writer,
             buf: self.buf,
             num_records_offset,
             num_records: 0,
@@ -343,7 +343,7 @@ impl<'a> ReservedCapacity<'a> {
 }
 
 pub struct Entry<'a> {
-    logger: &'a Logger<'a>,
+    writer: &'a LogWriter<'a>,
     buf: MappedMutexGuard<'a, Option<LogBuf>>,
     num_records_offset: usize,
     num_records: usize,
@@ -374,8 +374,8 @@ impl Drop for Entry<'_> {
         let bytes = self.buf.as_mut().unwrap().bytes.as_mut_slice();
         bytes[self.num_records_offset..][..std::mem::size_of::<u64>()]
             .copy_from_slice(&(self.num_records as u64).to_le_bytes());
-        if bytes.len() >= self.logger.channel.config.preallocated_buffer_size {
-            self.logger.queue(self.buf.take().unwrap());
+        if bytes.len() >= self.writer.channel.config.preallocated_buffer_size {
+            self.writer.queue(self.buf.take().unwrap());
         }
     }
 }
@@ -390,8 +390,8 @@ struct Consumer {
     free_bufs_tx: Sender<Vec<u8>>,
 }
 
-struct LogChannel {
-    logger_id: usize,
+pub struct LogChannel {
+    writer_id: usize,
     config: Arc<Config>,
     flush_queue: ArrayQueue<LogBuf>,
     durable_epoch: AtomicU32,
@@ -400,18 +400,20 @@ struct LogChannel {
 }
 
 impl LogChannel {
-    fn new(logger_id: usize, config: Arc<Config>) -> Self {
-        let path = config.dir.join(format!("log-{logger_id}"));
+    fn new(writer_id: usize, config: Arc<Config>) -> Self {
+        let path = config
+            .dir
+            .join(format!("{}{}", super::LOG_FILE_NAME_PREFIX, writer_id));
         let file = File::create(path).unwrap();
-        let flush_queue = ArrayQueue::new(config.buffers_per_logger);
-        let (free_bufs_tx, free_bufs_rx) = crossbeam_channel::bounded(config.buffers_per_logger);
-        for _ in 0..config.buffers_per_logger {
+        let flush_queue = ArrayQueue::new(config.buffers_per_writer);
+        let (free_bufs_tx, free_bufs_rx) = crossbeam_channel::bounded(config.buffers_per_writer);
+        for _ in 0..config.buffers_per_writer {
             free_bufs_tx
                 .try_send(Vec::with_capacity(config.preallocated_buffer_size))
                 .unwrap();
         }
         Self {
-            logger_id,
+            writer_id,
             config,
             flush_queue,
             durable_epoch: Default::default(),
@@ -439,7 +441,7 @@ impl LogChannel {
         self.flush_queue.push(buf).unwrap();
         flush_req_tx
             .send(FlushRequest {
-                logger_id: self.logger_id,
+                writer_id: self.writer_id,
             })
             .unwrap();
     }
@@ -452,7 +454,7 @@ impl LogChannel {
         }
 
         // While we are holding the lock, no other flusher can pop from
-        // flush_queue, but the logger can still push to flush_queue.
+        // flush_queue, but the writer can still push to flush_queue.
         let mut consumer = self.consumer.lock();
 
         // Checking again, because buffers may have been flushed while we are
@@ -461,9 +463,9 @@ impl LogChannel {
             return Ok(());
         }
 
-        assert!(self.flush_queue.len() <= self.config.buffers_per_logger);
+        assert!(self.flush_queue.len() <= self.config.buffers_per_writer);
 
-        let mut bufs_to_flush = Vec::with_capacity(self.config.buffers_per_logger);
+        let mut bufs_to_flush = Vec::with_capacity(self.config.buffers_per_writer);
         let mut min_epoch = OnceCell::new();
         while let Some(buf) = self.flush_queue.pop() {
             // Epoch must be monotonically increasing.
@@ -478,7 +480,7 @@ impl LogChannel {
         }
         let next_durable_epoch = Epoch(min_epoch.take().unwrap().0 - 1);
         assert!(!bufs_to_flush.is_empty());
-        assert!(bufs_to_flush.len() <= self.config.buffers_per_logger);
+        assert!(bufs_to_flush.len() <= self.config.buffers_per_writer);
 
         let mut start_buf_index = 0;
         let mut start_offset = 0;

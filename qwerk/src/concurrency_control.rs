@@ -6,19 +6,29 @@ pub use pessimistic::Pessimistic;
 
 use crate::{
     epoch::{Epoch, EpochGuard},
-    log::Logger,
+    persistence::LogWriter,
+    record::Record,
+    small_bytes::SmallBytes,
+    tid::Tid,
     Index, Result, Shared,
 };
 
 pub trait ConcurrencyControl: ConcurrencyControlInternal {}
 
 pub trait ConcurrencyControlInternal: Send + Sync + 'static {
-    type Record: Send + Sync + 'static;
+    type Record: Record;
     type Executor<'a>: TransactionExecutor + 'a
     where
         Self: 'a;
 
     fn init(gc_threshold: usize) -> Self;
+
+    fn load_log_entry(
+        index: &Index<Self::Record>,
+        key: SmallBytes,
+        value: Option<Box<[u8]>>,
+        tid: Tid,
+    );
 
     fn spawn_executor<'a>(
         &'a self,
@@ -33,7 +43,7 @@ pub trait TransactionExecutor {
 
     fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>>;
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()>;
-    fn commit(&mut self, logger: &Logger) -> Result<Epoch>;
+    fn commit(&mut self, log_writer: &LogWriter) -> Result<Epoch>;
 
     /// Aborts the transaction.
     ///
