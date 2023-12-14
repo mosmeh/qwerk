@@ -20,6 +20,7 @@ use std::{
 /// This is an implementation of [Silo](https://doi.org/10.1145/2517349.2522713).
 pub struct Optimistic {
     qsbr: Qsbr,
+    gc_threshold: usize,
 }
 
 impl ConcurrencyControl for Optimistic {}
@@ -28,9 +29,10 @@ impl ConcurrencyControlInternal for Optimistic {
     type Record = Record;
     type Executor<'a> = Executor<'a>;
 
-    fn init() -> Self {
+    fn init(gc_threshold: usize) -> Self {
         Self {
             qsbr: Default::default(),
+            gc_threshold,
         }
     }
 
@@ -41,7 +43,7 @@ impl ConcurrencyControlInternal for Optimistic {
     ) -> Self::Executor<'a> {
         Self::Executor {
             index,
-            qsbr: &self.qsbr,
+            global: self,
             epoch_guard,
             tid_generator: Default::default(),
             removal_queue: Default::default(),
@@ -148,7 +150,7 @@ struct RecordSnapshot<'a> {
 pub struct Executor<'a> {
     // Global state
     index: &'a Index<Record>,
-    qsbr: &'a Qsbr,
+    global: &'a Optimistic,
 
     // Per-executor state
     epoch_guard: EpochGuard<'a>,
@@ -176,7 +178,7 @@ impl TransactionExecutor for Executor<'_> {
         self.epoch_guard.release();
         self.qsbr_guard.mark_as_offline();
         self.process_removal_queue();
-        if self.garbage_bytes >= super::GC_THRESHOLD_BYTES {
+        if self.garbage_bytes >= self.global.gc_threshold {
             self.collect_garbage();
         }
     }
@@ -420,7 +422,7 @@ impl Executor<'_> {
 
     fn collect_garbage(&mut self) {
         assert!(!self.qsbr_guard.is_online());
-        self.qsbr.sync();
+        self.global.qsbr.sync();
         self.garbage_values.clear();
         for record_ptr in self.garbage_records.drain(..) {
             unsafe { record_ptr.drop_in_place() };

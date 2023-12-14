@@ -12,7 +12,7 @@ fn main() -> Result<()> {
 }
 
 fn run<C: ConcurrencyControl>() -> Result<()> {
-    let db = Database::<C>::new()?;
+    let db = Database::<C>::open("data")?;
 
     // You need to spawn workers to perform operations on the database.
     let mut worker = db.spawn_worker();

@@ -3,6 +3,7 @@ mod epoch;
 mod lock;
 mod log;
 mod qsbr;
+mod recovery;
 mod shared;
 mod slotted_cell;
 mod small_bytes;
@@ -17,6 +18,7 @@ use log::{LogSystem, Logger};
 use scc::HashIndex;
 use shared::Shared;
 use small_bytes::SmallBytes;
+use std::{path::Path, time::Duration};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -31,9 +33,118 @@ pub enum Error {
     /// Attempted to perform an operation on an aborted transaction.
     #[error("attempted to perform an operation on the aborted transaction")]
     AlreadyAborted,
+
+    /// Database is corrupted or tried to open a non-database directory.
+    #[error("database is corrupted or tried to open a non-database directory")]
+    Corrupted,
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+pub struct DatabaseOptions {
+    background_threads: usize,
+    epoch_duration: Duration,
+    gc_threshold: usize,
+    log_buffer_size_bytes: usize,
+    log_buffers_per_worker: usize,
+    fsync: bool,
+}
+
+impl Default for DatabaseOptions {
+    fn default() -> Self {
+        Self {
+            background_threads: match std::thread::available_parallelism() {
+                Ok(n) => n.get().min(4),
+                Err(_) => 1,
+            },
+            epoch_duration: Duration::from_millis(40), // Default in the Silo paper (Tu et al. 2013).
+            gc_threshold: 4096,
+            log_buffer_size_bytes: 1024 * 1024,
+            log_buffers_per_worker: 8,
+            fsync: true,
+        }
+    }
+}
+
+impl DatabaseOptions {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    /// Opens a database at the given path, creating it if it does not exist.
+    pub fn open<C, P>(self, path: P) -> Result<Database<C>>
+    where
+        C: ConcurrencyControl,
+        P: AsRef<Path>,
+    {
+        let dir = path.as_ref();
+        if dir.exists() && !dir.is_dir() {
+            return Err(Error::Corrupted);
+        }
+
+        let epoch_fw = EpochFramework::new(epoch::Config {
+            initial_epoch: Epoch::ZERO,
+            epoch_duration: self.epoch_duration,
+        });
+        let log_system = LogSystem::new(log::Config {
+            dir: dir.to_path_buf(),
+            flushing_threads: self.background_threads,
+            preallocated_buffer_size: self.log_buffer_size_bytes,
+            buffers_per_logger: self.log_buffers_per_worker,
+            fsync: self.fsync,
+        })?;
+        let concurrency_control = C::init(self.gc_threshold);
+
+        Ok(Database {
+            index: Default::default(),
+            concurrency_control,
+            epoch_fw,
+            log_system,
+        })
+    }
+
+    /// The number of background threads used for logging.
+    /// Defaults to the smaller of the number of CPU cores and 4.
+    pub const fn background_threads(mut self, n: usize) -> Self {
+        self.background_threads = n;
+        self
+    }
+
+    /// The duration of an epoch. Defaults to 40 milliseconds.
+    pub const fn epoch_duration(mut self, duration: Duration) -> Self {
+        self.epoch_duration = duration;
+        self
+    }
+
+    /// Workers perform garbage collection of removed records when this number
+    /// of bytes of garbage is accumulated. Defaults to 4 KiB.
+    pub const fn gc_threshold(mut self, bytes: usize) -> Self {
+        self.gc_threshold = bytes;
+        self
+    }
+
+    /// The size of a log buffer in bytes. Workers pass logs to log flushing
+    /// threads in chunks of this size. Defaults to 1 MiB.
+    pub const fn log_buffer_size(mut self, bytes: usize) -> Self {
+        self.log_buffer_size_bytes = bytes;
+        self
+    }
+
+    /// The number of log buffers per worker. Defaults to 8.
+    pub const fn log_buffers_per_worker(mut self, n: usize) -> Self {
+        self.log_buffers_per_worker = n;
+        self
+    }
+
+    /// Whether to call `fsync` after writing to a disk. Defaults to `true`.
+    pub const fn fsync(mut self, yes: bool) -> Self {
+        self.fsync = yes;
+        self
+    }
+}
 
 type Index<T> = HashIndex<SmallBytes, Shared<T>>;
 
@@ -45,13 +156,9 @@ pub struct Database<C: ConcurrencyControl> {
 }
 
 impl<C: ConcurrencyControl> Database<C> {
-    pub fn new() -> std::io::Result<Self> {
-        Ok(Self {
-            index: Default::default(),
-            concurrency_control: C::init(),
-            epoch_fw: Default::default(),
-            log_system: LogSystem::new()?,
-        })
+    /// Opens a database at the given path, creating it if it does not exist.
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        DatabaseOptions::new().open(path)
     }
 
     /// Spawns a [`Worker`], which can be used to perform transactions.

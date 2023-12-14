@@ -21,6 +21,7 @@ use std::{
 /// NO_WAIT deadlock prevention.
 pub struct Pessimistic {
     qsbr: Qsbr,
+    gc_threshold: usize,
 }
 
 impl ConcurrencyControl for Pessimistic {}
@@ -29,9 +30,10 @@ impl ConcurrencyControlInternal for Pessimistic {
     type Record = Record;
     type Executor<'a> = Executor<'a>;
 
-    fn init() -> Self {
+    fn init(gc_threshold: usize) -> Self {
         Self {
             qsbr: Default::default(),
+            gc_threshold,
         }
     }
 
@@ -42,7 +44,7 @@ impl ConcurrencyControlInternal for Pessimistic {
     ) -> Self::Executor<'a> {
         Self::Executor {
             index,
-            qsbr: &self.qsbr,
+            global: self,
             epoch_guard,
             tid_generator: Default::default(),
             qsbr_guard: self.qsbr.acquire(),
@@ -81,7 +83,7 @@ impl Record {
 pub struct Executor<'a> {
     // Global state
     index: &'a Index<Record>,
-    qsbr: &'a Qsbr,
+    global: &'a Pessimistic,
 
     // Per-executor state
     epoch_guard: EpochGuard<'a>,
@@ -109,7 +111,7 @@ impl TransactionExecutor for Executor<'_> {
             .garbage_records
             .len()
             .saturating_mul(std::mem::size_of::<Record>());
-        if garbage_bytes >= super::GC_THRESHOLD_BYTES {
+        if garbage_bytes >= self.global.gc_threshold {
             self.collect_garbage();
         }
     }

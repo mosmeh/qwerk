@@ -20,6 +20,7 @@ const RECLAMATION_EPOCH_OFFSET: u32 = 2;
 
 const OFFLINE_EPOCH: u32 = u32::MAX;
 
+/// A unit of time for concurrency control and durability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Epoch(pub u32);
 
@@ -39,15 +40,6 @@ pub struct Config {
 pub struct EpochFramework {
     shared: Arc<SharedState>,
     epoch_bumper: Option<JoinHandle<()>>,
-}
-
-impl Default for EpochFramework {
-    fn default() -> Self {
-        Self::new(Config {
-            initial_epoch: Epoch::ZERO,
-            epoch_duration: Duration::from_millis(40), // Default in the Silo paper (Tu et al. 2013).
-        })
-    }
 }
 
 impl EpochFramework {

@@ -2,6 +2,7 @@ use crate::{
     epoch::Epoch,
     slotted_cell::{Slot, SlottedCell},
     tid::Tid,
+    Error, Result,
 };
 use crossbeam_channel::{Receiver, Sender};
 use crossbeam_queue::ArrayQueue;
@@ -10,6 +11,7 @@ use std::{
     cell::OnceCell,
     fs::{DirBuilder, File},
     io::{IoSlice, Write},
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering::SeqCst},
         Arc,
@@ -18,16 +20,17 @@ use std::{
     time::Duration,
 };
 
-pub const DATA_DIR: &str = "data";
-pub const PEPOCH_FILENAME: &str = "data/pepoch";
-const TMP_PEPOCH_FILENAME: &str = "data/pepoch.tmp";
-
-const NUM_FLUSHERS: usize = 4;
-const PREALLOCATED_BUF_SIZE: usize = 1024 * 1024;
-const NUM_BUFS_PER_LOGGER: usize = 8;
+pub struct Config {
+    pub dir: PathBuf,
+    pub flushing_threads: usize,
+    pub preallocated_buffer_size: usize,
+    pub buffers_per_logger: usize,
+    pub fsync: bool,
+}
 
 /// A redo logging system.
 pub struct LogSystem {
+    config: Arc<Config>,
     channels: Arc<SlottedCell<LogChannel>>,
     durable_epoch: Arc<DurableEpoch>,
     flush_req_tx: Option<Sender<FlushRequest>>,
@@ -37,8 +40,8 @@ pub struct LogSystem {
 }
 
 impl LogSystem {
-    pub fn new() -> std::io::Result<Self> {
-        DirBuilder::new().recursive(true).create(DATA_DIR)?;
+    pub fn new(config: Config) -> Result<Self> {
+        DirBuilder::new().recursive(true).create(&config.dir)?;
 
         let channels = Arc::new(SlottedCell::<LogChannel>::default());
 
@@ -47,7 +50,7 @@ impl LogSystem {
         // references to LogChannel.
         let (flush_req_tx, flush_req_rx) = crossbeam_channel::unbounded::<FlushRequest>();
 
-        let flushers = (0..NUM_FLUSHERS)
+        let flushers = (0..config.flushing_threads)
             .map(|_| {
                 let channels = channels.clone();
                 let flush_req_rx = flush_req_rx.clone();
@@ -59,7 +62,7 @@ impl LogSystem {
             })
             .collect();
 
-        let durable_epoch = Arc::new(DurableEpoch::new(channels.clone()));
+        let durable_epoch = Arc::new(DurableEpoch::new(&config.dir)?);
         let is_running = Arc::new(AtomicBool::new(true));
         let daemon = {
             let channels = channels.clone();
@@ -73,6 +76,7 @@ impl LogSystem {
         };
 
         Ok(Self {
+            config: config.into(),
             channels,
             durable_epoch,
             flush_req_tx: Some(flush_req_tx),
@@ -84,13 +88,15 @@ impl LogSystem {
 
     pub fn spawn_logger(&self) -> Logger {
         Logger {
-            channel: self.channels.alloc_with(LogChannel::new),
+            channel: self
+                .channels
+                .alloc_with(|logger_id| LogChannel::new(logger_id, self.config.clone())),
             flush_req_tx: self.flush_req_tx.clone().unwrap(),
         }
     }
 
     pub fn durable_epoch(&self) -> Epoch {
-        self.durable_epoch.load()
+        self.durable_epoch.get()
     }
 
     pub fn flush(&self) -> std::io::Result<()> {
@@ -111,7 +117,7 @@ impl LogSystem {
             }
             channel.flush()?;
         }
-        self.durable_epoch.update()?;
+        self.durable_epoch.update(&self.channels)?;
         Ok(())
     }
 }
@@ -158,35 +164,46 @@ fn run_daemon(
                 channel.queue(buf.take().unwrap(), &flush_req_tx);
             }
         }
-        durable_epoch.update().unwrap();
+        durable_epoch.update(channels).unwrap();
         std::thread::sleep(Duration::from_millis(40));
     }
 }
 
 struct DurableEpoch {
+    path: PathBuf,
+    tmp_path: PathBuf,
     epoch: AtomicU32,
     mutex: Mutex<()>,
-    channels: Arc<SlottedCell<LogChannel>>,
 }
 
 impl DurableEpoch {
-    fn new(channels: Arc<SlottedCell<LogChannel>>) -> Self {
-        Self {
-            epoch: Default::default(),
+    fn new(dir: &Path) -> Result<Self> {
+        let path = dir.join("durable_epoch");
+        let epoch = match std::fs::read(&path) {
+            Ok(bytes) => {
+                let bytes = bytes.try_into().map_err(|_| Error::Corrupted)?;
+                u32::from_le_bytes(bytes)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => return Err(e.into()),
+        };
+        Ok(Self {
+            path,
+            tmp_path: dir.join("durable_epoch.tmp"),
+            epoch: epoch.into(),
             mutex: Default::default(),
-            channels,
-        }
+        })
     }
 
-    fn load(&self) -> Epoch {
+    fn get(&self) -> Epoch {
         Epoch(self.epoch.load(SeqCst))
     }
 
-    fn update(&self) -> std::io::Result<()> {
+    fn update(&self, channels: &SlottedCell<LogChannel>) -> std::io::Result<()> {
         let _guard = self.mutex.lock();
 
         let mut min_epoch = None;
-        for channel in self.channels.iter() {
+        for channel in channels.iter() {
             let Some(durable_epoch) = channel.durable_epoch() else {
                 // This logger has not flushed anything yet.
                 // We would underestimate the durable epoch if we skip
@@ -203,13 +220,13 @@ impl DurableEpoch {
         };
 
         {
-            let mut tmp_pepoch = File::create(TMP_PEPOCH_FILENAME)?;
+            let mut tmp_pepoch = File::create(&self.tmp_path)?;
             tmp_pepoch.write_all(&new_epoch.0.to_le_bytes())?;
             tmp_pepoch.sync_data()?;
         }
 
         // Atomically replace the file.
-        std::fs::rename(TMP_PEPOCH_FILENAME, PEPOCH_FILENAME)?;
+        std::fs::rename(&self.tmp_path, &self.path)?;
         // TODO: fsync the parent directory.
 
         let prev_epoch = Epoch(self.epoch.swap(new_epoch.0, SeqCst));
@@ -265,26 +282,32 @@ impl<'a> CapacityReserver<'a> {
     }
 
     pub fn finish(self) -> ReservedCapacity<'a> {
+        let size = self.logger.channel.config.preallocated_buffer_size;
         let mut producer = self.logger.channel.producer.lock();
         if producer
             .current_buf
             .as_ref()
-            .map(|buf| {
-                !buf.bytes.is_empty() && buf.bytes.len() + self.num_bytes > PREALLOCATED_BUF_SIZE
-            })
+            .map(|buf| !buf.bytes.is_empty() && buf.bytes.len() + self.num_bytes > size)
             .unwrap_or_default()
         {
             self.logger.queue(producer.current_buf.take().unwrap());
         }
+
         if producer.current_buf.is_none() {
-            producer.current_buf = Some(LogBuf::new(producer.free_bufs_rx.recv().unwrap()));
+            let bytes = producer.free_bufs_rx.recv().unwrap();
+            assert!(bytes.is_empty());
+            producer.current_buf = Some(LogBuf::new(bytes));
         }
+
+        // The buffer can exceed the preallocated size if the single transaction
+        // is too large.
         producer
             .current_buf
             .as_mut()
             .unwrap()
             .bytes
             .reserve(self.num_bytes);
+
         ReservedCapacity {
             logger: self.logger,
             buf: MutexGuard::map(producer, |producer| &mut producer.current_buf),
@@ -351,7 +374,7 @@ impl Drop for Entry<'_> {
         let bytes = self.buf.as_mut().unwrap().bytes.as_mut_slice();
         bytes[self.num_records_offset..][..std::mem::size_of::<u64>()]
             .copy_from_slice(&(self.num_records as u64).to_le_bytes());
-        if bytes.len() >= PREALLOCATED_BUF_SIZE {
+        if bytes.len() >= self.logger.channel.config.preallocated_buffer_size {
             self.logger.queue(self.buf.take().unwrap());
         }
     }
@@ -369,6 +392,7 @@ struct Consumer {
 
 struct LogChannel {
     logger_id: usize,
+    config: Arc<Config>,
     flush_queue: ArrayQueue<LogBuf>,
     durable_epoch: AtomicU32,
     producer: Mutex<Producer>,
@@ -376,18 +400,20 @@ struct LogChannel {
 }
 
 impl LogChannel {
-    fn new(logger_id: usize) -> Self {
-        let path = format!("{}/log-{}", DATA_DIR, logger_id);
+    fn new(logger_id: usize, config: Arc<Config>) -> Self {
+        let path = config.dir.join(format!("log-{logger_id}"));
         let file = File::create(path).unwrap();
-        let (free_bufs_tx, free_bufs_rx) = crossbeam_channel::bounded(NUM_BUFS_PER_LOGGER);
-        for _ in 0..NUM_BUFS_PER_LOGGER {
+        let flush_queue = ArrayQueue::new(config.buffers_per_logger);
+        let (free_bufs_tx, free_bufs_rx) = crossbeam_channel::bounded(config.buffers_per_logger);
+        for _ in 0..config.buffers_per_logger {
             free_bufs_tx
-                .try_send(Vec::with_capacity(PREALLOCATED_BUF_SIZE))
+                .try_send(Vec::with_capacity(config.preallocated_buffer_size))
                 .unwrap();
         }
         Self {
             logger_id,
-            flush_queue: ArrayQueue::new(NUM_BUFS_PER_LOGGER),
+            config,
+            flush_queue,
             durable_epoch: Default::default(),
             producer: Mutex::new(Producer {
                 current_buf: Default::default(),
@@ -435,9 +461,9 @@ impl LogChannel {
             return Ok(());
         }
 
-        assert!(self.flush_queue.len() <= NUM_BUFS_PER_LOGGER);
+        assert!(self.flush_queue.len() <= self.config.buffers_per_logger);
 
-        let mut bufs_to_flush = Vec::with_capacity(NUM_BUFS_PER_LOGGER);
+        let mut bufs_to_flush = Vec::with_capacity(self.config.buffers_per_logger);
         let mut min_epoch = OnceCell::new();
         while let Some(buf) = self.flush_queue.pop() {
             // Epoch must be monotonically increasing.
@@ -452,7 +478,7 @@ impl LogChannel {
         }
         let next_durable_epoch = Epoch(min_epoch.take().unwrap().0 - 1);
         assert!(!bufs_to_flush.is_empty());
-        assert!(bufs_to_flush.len() <= NUM_BUFS_PER_LOGGER);
+        assert!(bufs_to_flush.len() <= self.config.buffers_per_logger);
 
         let mut start_buf_index = 0;
         let mut start_offset = 0;
@@ -500,7 +526,9 @@ impl LogChannel {
             }
         }
         assert_eq!(start_buf_index, bufs_to_flush.len());
-        consumer.file.sync_data()?;
+        if self.config.fsync {
+            consumer.file.sync_data()?;
+        }
 
         let prev_durable_epoch = Epoch(self.durable_epoch.swap(next_durable_epoch.0, SeqCst));
         assert!(prev_durable_epoch <= next_durable_epoch);

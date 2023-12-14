@@ -118,7 +118,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> Result<()> {
     };
 
     let shared = Arc::new(SharedState {
-        db: Database::<C>::new()?,
+        db: Database::<C>::open("data")?,
         barrier: Barrier::new(cli.threads + 1),
         is_running: true.into(),
         latest: cli.records.into(),

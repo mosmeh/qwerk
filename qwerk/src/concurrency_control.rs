@@ -10,8 +10,6 @@ use crate::{
     Index, Result, Shared,
 };
 
-const GC_THRESHOLD_BYTES: usize = 4096;
-
 pub trait ConcurrencyControl: ConcurrencyControlInternal {}
 
 pub trait ConcurrencyControlInternal: Send + Sync + 'static {
@@ -20,9 +18,7 @@ pub trait ConcurrencyControlInternal: Send + Sync + 'static {
     where
         Self: 'a;
 
-    // We need this because we don't want to expose implementations of
-    // `Default` to the user.
-    fn init() -> Self;
+    fn init(gc_threshold: usize) -> Self;
 
     fn spawn_executor<'a>(
         &'a self,
