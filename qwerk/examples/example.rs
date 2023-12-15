@@ -25,6 +25,12 @@ fn run<C: ConcurrencyControl>() -> Result<()> {
     // concurrent transactions.
 
     let mut txn = worker.begin_transaction();
+    txn.remove(b"alice")?;
+    txn.remove(b"bob")?;
+    txn.remove(b"carol")?;
+    txn.commit()?;
+
+    let mut txn = worker.begin_transaction();
     assert!(txn.get(b"alice")?.is_none());
     txn.insert(b"alice", b"foo")?;
     assert_eq!(txn.get(b"alice")?, Some(b"foo".as_slice()));

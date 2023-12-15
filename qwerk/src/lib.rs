@@ -15,11 +15,11 @@ pub use transaction::Transaction;
 
 use concurrency_control::TransactionExecutor;
 use epoch::EpochFramework;
-use persistence::{DurableEpoch, LogWriter, Logger, LoggerConfig};
+use persistence::{LogWriter, Logger, LoggerConfig, PersistedDurableEpoch};
 use scc::HashIndex;
 use shared::Shared;
 use small_bytes::SmallBytes;
-use std::{path::Path, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -86,15 +86,18 @@ impl DatabaseOptions {
             return Err(Error::Corrupted);
         }
 
-        let durable_epoch = DurableEpoch::new(dir)?.get();
+        let persisted_durable_epoch = PersistedDurableEpoch::new(dir)?;
+        let durable_epoch = persisted_durable_epoch.get();
         let index = persistence::recover::<C>(dir, durable_epoch, self.background_threads)?;
 
-        let epoch_fw = EpochFramework::new(epoch::Config {
+        let epoch_fw = Arc::new(EpochFramework::new(epoch::Config {
             initial_epoch: durable_epoch.increment(),
             epoch_duration: self.epoch_duration,
-        });
+        }));
         let logger = Logger::new(LoggerConfig {
             dir: dir.to_path_buf(),
+            epoch_fw: epoch_fw.clone(),
+            persisted_durable_epoch,
             flushing_threads: self.background_threads,
             preallocated_buffer_size: self.log_buffer_size_bytes,
             buffers_per_writer: self.log_buffers_per_worker,
@@ -162,7 +165,7 @@ mod record {
 pub struct Database<C: ConcurrencyControl> {
     index: Index<C::Record>,
     concurrency_control: C,
-    epoch_fw: EpochFramework,
+    epoch_fw: Arc<EpochFramework>,
     logger: Logger,
 }
 

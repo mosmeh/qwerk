@@ -1,5 +1,5 @@
 use crate::{
-    epoch::Epoch,
+    epoch::{Epoch, EpochFramework},
     slotted_cell::{Slot, SlottedCell},
     tid::Tid,
     Error, Result,
@@ -17,11 +17,12 @@ use std::{
         Arc,
     },
     thread::JoinHandle,
-    time::Duration,
 };
 
 pub struct Config {
     pub dir: PathBuf,
+    pub epoch_fw: Arc<EpochFramework>,
+    pub persisted_durable_epoch: PersistedDurableEpoch,
     pub flushing_threads: usize,
     pub preallocated_buffer_size: usize,
     pub buffers_per_writer: usize,
@@ -32,7 +33,6 @@ pub struct Config {
 pub struct Logger {
     config: Arc<Config>,
     channels: Arc<SlottedCell<LogChannel>>,
-    durable_epoch: Arc<DurableEpoch>,
     flush_req_tx: Option<Sender<FlushRequest>>,
     flushers: Vec<JoinHandle<()>>,
     daemon: Option<JoinHandle<()>>,
@@ -56,29 +56,38 @@ impl Logger {
                 let flush_req_rx = flush_req_rx.clone();
                 std::thread::spawn(move || {
                     while let Ok(req) = flush_req_rx.recv() {
-                        channels.get(req.writer_id).unwrap().flush().unwrap();
+                        let channel = channels
+                            .get(req.channel_index)
+                            .expect("invalid channel index");
+                        if channel.flush_queue.is_empty() {
+                            // The buffers have already been flushed when
+                            // handling previous flush requests,
+                            // or are being flushed by other flushers.
+                            continue;
+                        }
+                        let mut consumer = channel.consumer.lock();
+                        channel.flush(&mut consumer).unwrap();
                     }
                 })
             })
             .collect();
 
-        let durable_epoch = Arc::new(DurableEpoch::new(&config.dir)?);
+        let config = Arc::new(config);
         let is_running = Arc::new(AtomicBool::new(true));
         let daemon = {
+            let config = config.clone();
             let channels = channels.clone();
-            let durable_epoch = durable_epoch.clone();
             let flush_req_tx = flush_req_tx.clone();
             let is_running = is_running.clone();
             std::thread::Builder::new()
                 .name("log_system_daemon".into())
-                .spawn(move || run_daemon(&channels, &durable_epoch, flush_req_tx, &is_running))
+                .spawn(move || run_daemon(&config, &channels, flush_req_tx, &is_running))
                 .unwrap()
         };
 
         Ok(Self {
-            config: config.into(),
+            config,
             channels,
-            durable_epoch,
             flush_req_tx: Some(flush_req_tx),
             flushers,
             daemon: Some(daemon),
@@ -90,34 +99,34 @@ impl Logger {
         LogWriter {
             channel: self
                 .channels
-                .alloc_with(|writer_id| LogChannel::new(writer_id, self.config.clone())),
+                .alloc_with(|index| LogChannel::new(index, self.config.clone())),
             flush_req_tx: self.flush_req_tx.clone().unwrap(),
         }
     }
 
     pub fn durable_epoch(&self) -> Epoch {
-        self.durable_epoch.get()
+        self.config.persisted_durable_epoch.get()
     }
 
+    /// Makes sure that all the logs written before this call are durable.
     pub fn flush(&self) -> std::io::Result<()> {
+        let reclamation_epoch = self.config.epoch_fw.sync();
         for channel in self.channels.iter() {
-            {
-                let mut producer = channel.producer.lock();
-                let buf = &mut producer.current_buf;
-                if buf
-                    .as_ref()
-                    .map(|buf| !buf.bytes.is_empty())
-                    .unwrap_or_default()
-                {
-                    // We don't use channel.queue() here, because we flush
-                    // the buffer by ourselves and don't need to request
-                    // a flush.
-                    channel.flush_queue.push(buf.take().unwrap()).unwrap();
-                }
+            let mut producer = channel.producer.lock();
+            if let Some(buf) = producer.take_queueable_buf() {
+                channel.queue(buf);
             }
-            channel.flush()?;
+
+            let mut consumer = channel.consumer.lock();
+            channel.flush(&mut consumer)?;
+            assert!(channel.flush_queue.is_empty());
+
+            // The next log buffer that will be queued to the channel will
+            // have an epoch > reclamation_epoch. Thus, we are sure that
+            // durable_epoch is at least reclamation_epoch.
+            channel.durable_epoch.fetch_max(reclamation_epoch.0, SeqCst);
         }
-        self.durable_epoch.update(&self.channels)?;
+        self.config.persisted_durable_epoch.update(&self.channels)?;
         Ok(())
     }
 }
@@ -134,16 +143,18 @@ impl Drop for Logger {
     }
 }
 
-// The daemon serves two purposes:
+// The daemon serves the following purposes:
 // 1. It periodically queues current_buf to flush_queue.
 //    This is needed because the TransactionExecutors may not process further
 //    transactions, and in such case the current_buf will never be queued.
 //    The daemon ensures that the current_buf is queued at some point.
-// 2. It periodically updates the durable epoch by calculating the minimum
-//    durable epoch of all writers.
+// 2. It bumps durable_epoch of channels that have no activity, so that they
+//    don't drag down the global durable epoch.
+// 3. It updates the global durable epoch by calculating the minimum
+//    durable epoch of all channels.
 fn run_daemon(
+    config: &Config,
     channels: &SlottedCell<LogChannel>,
-    durable_epoch: &DurableEpoch,
     flush_req_tx: Sender<FlushRequest>,
     is_running: &AtomicBool,
 ) {
@@ -155,28 +166,45 @@ fn run_daemon(
             let Some(mut producer) = channel.producer.try_lock() else {
                 continue;
             };
-            let buf = &mut producer.current_buf;
-            if buf
-                .as_ref()
-                .map(|buf| !buf.bytes.is_empty())
-                .unwrap_or_default()
-            {
-                channel.queue(buf.take().unwrap(), &flush_req_tx);
+
+            // 1. Queue current_buf to flush_queue.
+            if let Some(buf) = producer.take_queueable_buf() {
+                channel.queue(buf);
+                channel.request_flush(&flush_req_tx);
+                continue;
+            }
+
+            // 2. Bump durable_epoch of channels that have no activity.
+            let Some(_consumer) = channel.consumer.try_lock() else {
+                continue;
+            };
+            if channel.flush_queue.is_empty() {
+                // The next log buffer that will be queued to the channel
+                // will have an epoch > reclamation_epoch.
+                // Thus, we are sure that durable_epoch is at least
+                // reclamation_epoch.
+                channel
+                    .durable_epoch
+                    .fetch_max(config.epoch_fw.reclamation_epoch().0, SeqCst);
             }
         }
-        durable_epoch.update(channels).unwrap();
-        std::thread::sleep(Duration::from_millis(40));
+
+        // 3. Update and persist the global durable epoch.
+        config.persisted_durable_epoch.update(channels).unwrap();
+
+        std::thread::sleep(config.epoch_fw.epoch_duration());
     }
 }
 
-pub struct DurableEpoch {
+/// Global durable epoch persisted to the disk.
+pub struct PersistedDurableEpoch {
     path: PathBuf,
     tmp_path: PathBuf,
     epoch: AtomicU32,
     mutex: Mutex<()>,
 }
 
-impl DurableEpoch {
+impl PersistedDurableEpoch {
     pub fn new(dir: &Path) -> Result<Self> {
         let path = dir.join("durable_epoch");
         let epoch = match std::fs::read(&path) {
@@ -199,6 +227,8 @@ impl DurableEpoch {
         Epoch(self.epoch.load(SeqCst))
     }
 
+    /// Updates the global durable epoch to the minimum durable epoch of
+    /// all channels.
     fn update(&self, channels: &SlottedCell<LogChannel>) -> std::io::Result<()> {
         let _guard = self.mutex.lock();
 
@@ -237,10 +267,10 @@ impl DurableEpoch {
 }
 
 struct FlushRequest {
-    writer_id: usize,
+    channel_index: usize,
 }
 
-// Architecture (single writer/channel):
+// Architecture (single channel):
 //                                  +---- flush_req ----+
 //                                  |                   |
 //                                  |                   v
@@ -263,8 +293,9 @@ impl LogWriter<'_> {
         }
     }
 
-    fn queue(&self, buf: LogBuf) {
-        self.channel.queue(buf, &self.flush_req_tx);
+    fn queue_and_request_flush(&self, buf: LogBuf) {
+        self.channel.queue(buf);
+        self.channel.request_flush(&self.flush_req_tx);
     }
 }
 
@@ -290,7 +321,8 @@ impl<'a> CapacityReserver<'a> {
             .map(|buf| !buf.bytes.is_empty() && buf.bytes.len() + self.num_bytes > size)
             .unwrap_or_default()
         {
-            self.writer.queue(producer.current_buf.take().unwrap());
+            self.writer
+                .queue_and_request_flush(producer.current_buf.take().unwrap());
         }
 
         if producer.current_buf.is_none() {
@@ -375,7 +407,8 @@ impl Drop for Entry<'_> {
         bytes[self.num_records_offset..][..std::mem::size_of::<u64>()]
             .copy_from_slice(&(self.num_records as u64).to_le_bytes());
         if bytes.len() >= self.writer.channel.config.preallocated_buffer_size {
-            self.writer.queue(self.buf.take().unwrap());
+            self.writer
+                .queue_and_request_flush(self.buf.take().unwrap());
         }
     }
 }
@@ -385,13 +418,25 @@ struct Producer {
     free_bufs_rx: Receiver<Vec<u8>>,
 }
 
+impl Producer {
+    fn take_queueable_buf(&mut self) -> Option<LogBuf> {
+        if let Some(buf) = &mut self.current_buf {
+            if !buf.bytes.is_empty() {
+                assert!(buf.min_epoch.get().is_some());
+                return self.current_buf.take();
+            }
+        }
+        None
+    }
+}
+
 struct Consumer {
     file: File,
     free_bufs_tx: Sender<Vec<u8>>,
 }
 
 pub struct LogChannel {
-    writer_id: usize,
+    index: usize,
     config: Arc<Config>,
     flush_queue: ArrayQueue<LogBuf>,
     durable_epoch: AtomicU32,
@@ -400,10 +445,10 @@ pub struct LogChannel {
 }
 
 impl LogChannel {
-    fn new(writer_id: usize, config: Arc<Config>) -> Self {
+    fn new(index: usize, config: Arc<Config>) -> Self {
         let path = config
             .dir
-            .join(format!("{}{}", super::LOG_FILE_NAME_PREFIX, writer_id));
+            .join(format!("{}{}", super::LOG_FILE_NAME_PREFIX, index));
         let file = File::create(path).unwrap();
         let flush_queue = ArrayQueue::new(config.buffers_per_writer);
         let (free_bufs_tx, free_bufs_rx) = crossbeam_channel::bounded(config.buffers_per_writer);
@@ -413,7 +458,7 @@ impl LogChannel {
                 .unwrap();
         }
         Self {
-            writer_id,
+            index,
             config,
             flush_queue,
             durable_epoch: Default::default(),
@@ -435,30 +480,21 @@ impl LogChannel {
         }
     }
 
-    fn queue(&self, buf: LogBuf, flush_req_tx: &Sender<FlushRequest>) {
+    fn queue(&self, buf: LogBuf) {
         assert!(!buf.bytes.is_empty());
         assert!(buf.min_epoch.get().is_some());
         self.flush_queue.push(buf).unwrap();
+    }
+
+    fn request_flush(&self, flush_req_tx: &Sender<FlushRequest>) {
         flush_req_tx
             .send(FlushRequest {
-                writer_id: self.writer_id,
+                channel_index: self.index,
             })
             .unwrap();
     }
 
-    fn flush(&self) -> std::io::Result<()> {
-        if self.flush_queue.is_empty() {
-            // The buffers have already been flushed when handling previous
-            // flush requests, or are being flushed by other flushers.
-            return Ok(());
-        }
-
-        // While we are holding the lock, no other flusher can pop from
-        // flush_queue, but the writer can still push to flush_queue.
-        let mut consumer = self.consumer.lock();
-
-        // Checking again, because buffers may have been flushed while we are
-        // waiting for the lock.
+    fn flush(&self, consumer: &mut Consumer) -> std::io::Result<()> {
         if self.flush_queue.is_empty() {
             return Ok(());
         }
@@ -483,11 +519,11 @@ impl LogChannel {
         assert!(bufs_to_flush.len() <= self.config.buffers_per_writer);
 
         let mut start_buf_index = 0;
-        let mut start_offset = 0;
+        let mut start_byte_offset = 0;
         while start_buf_index < bufs_to_flush.len() {
             let mut slices = Vec::with_capacity(bufs_to_flush.len() - start_buf_index);
             slices.push(IoSlice::new(
-                &bufs_to_flush[start_buf_index][start_offset..],
+                &bufs_to_flush[start_buf_index][start_byte_offset..],
             ));
             slices.extend(
                 bufs_to_flush[start_buf_index + 1..]
@@ -517,10 +553,10 @@ impl LogChannel {
                     }
                     if num_bufs_to_remove > 0 {
                         start_buf_index += num_bufs_to_remove;
-                        start_offset = 0;
+                        start_byte_offset = 0;
                     }
                     if start_buf_index < bufs_to_flush.len() {
-                        start_offset += left;
+                        start_byte_offset += left;
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => (),
@@ -528,6 +564,7 @@ impl LogChannel {
             }
         }
         assert_eq!(start_buf_index, bufs_to_flush.len());
+
         if self.config.fsync {
             consumer.file.sync_data()?;
         }
