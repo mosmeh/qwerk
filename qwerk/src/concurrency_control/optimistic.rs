@@ -298,7 +298,7 @@ impl TransactionExecutor for Executor<'_> {
         Ok(())
     }
 
-    fn commit(&mut self, log_writer: &LogWriter) -> Result<Epoch> {
+    fn commit(&mut self, log_writer: &mut LogWriter) -> Result<Epoch> {
         let mut log_capacity_reserver = log_writer.reserver();
         for item in &self.write_set {
             log_capacity_reserver.reserve_write(&item.key, item.value.as_deref());
