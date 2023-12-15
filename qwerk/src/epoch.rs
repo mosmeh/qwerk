@@ -38,6 +38,7 @@ pub struct Config {
 }
 
 pub struct EpochFramework {
+    epoch_duration: Duration,
     shared: Arc<SharedState>,
     epoch_bumper: Option<JoinHandle<()>>,
 }
@@ -75,9 +76,22 @@ impl EpochFramework {
         };
 
         Self {
+            epoch_duration: config.epoch_duration,
             shared,
             epoch_bumper: Some(epoch_bumper),
         }
+    }
+
+    pub const fn epoch_duration(&self) -> Duration {
+        self.epoch_duration
+    }
+
+    /// Returns the reclamation epoch.
+    ///
+    /// The reclamation epoch is the largest epoch that no participant of the
+    /// epoch framework is currently in.
+    pub fn reclamation_epoch(&self) -> Epoch {
+        Epoch(self.shared.global_epoch.load(SeqCst) - RECLAMATION_EPOCH_OFFSET)
     }
 
     pub fn acquire(&self) -> EpochGuard {
@@ -88,6 +102,20 @@ impl EpochFramework {
                 .local_epochs
                 .alloc_with(|_| AtomicU32::new(OFFLINE_EPOCH).into()),
         }
+    }
+
+    /// Waits until the current global epoch becomes reclaimable.
+    ///
+    /// Returns the new reclamation epoch, which is the global epoch when
+    /// this method is called.
+    pub fn sync(&self) -> Epoch {
+        let new_reclamation_epoch = self.shared.global_epoch.load(SeqCst);
+        let new_global_epoch = new_reclamation_epoch + RECLAMATION_EPOCH_OFFSET;
+        let backoff = Backoff::new();
+        while self.shared.global_epoch.load(SeqCst) < new_global_epoch {
+            backoff.snooze();
+        }
+        Epoch(new_reclamation_epoch)
     }
 }
 
