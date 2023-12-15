@@ -43,7 +43,7 @@ pub trait TransactionExecutor {
 
     fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>>;
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()>;
-    fn commit(&mut self, log_writer: &LogWriter) -> Result<Epoch>;
+    fn commit(&mut self, log_writer: &mut LogWriter) -> Result<Epoch>;
 
     /// Aborts the transaction.
     ///

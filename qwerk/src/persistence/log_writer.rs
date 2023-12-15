@@ -256,7 +256,7 @@ pub struct LogWriter<'a> {
 }
 
 impl LogWriter<'_> {
-    pub const fn reserver(&self) -> CapacityReserver {
+    pub fn reserver(&mut self) -> CapacityReserver {
         CapacityReserver {
             writer: self,
             num_bytes: std::mem::size_of::<u64>() * 2, // tid and num_records
