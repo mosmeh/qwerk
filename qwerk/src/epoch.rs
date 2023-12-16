@@ -24,6 +24,7 @@ const OFFLINE_EPOCH: u32 = u32::MAX;
 ///
 /// Epochs are represented as integers that are non-decreasing over time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
 pub struct Epoch(pub u32);
 
 impl Epoch {

@@ -10,7 +10,7 @@ use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use std::{
     cell::OnceCell,
     fs::{DirBuilder, File},
-    io::{IoSlice, Write},
+    io::{IoSlice, Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering::SeqCst},
@@ -213,10 +213,14 @@ pub struct PersistedDurableEpoch {
 
 impl PersistedDurableEpoch {
     pub fn new(dir: &Path) -> Result<Self> {
+        const FILE_SIZE: usize = std::mem::size_of::<Epoch>();
+
         let path = dir.join("durable_epoch");
-        let epoch = match std::fs::read(&path) {
-            Ok(bytes) => {
-                let bytes = bytes.try_into().map_err(|_| Error::Corrupted)?;
+        let epoch = match File::open(&path) {
+            Ok(file) if file.metadata()?.len() != FILE_SIZE as u64 => return Err(Error::Corrupted),
+            Ok(mut file) => {
+                let mut bytes = [0; FILE_SIZE];
+                file.read_exact(&mut bytes)?;
                 u32::from_le_bytes(bytes)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
