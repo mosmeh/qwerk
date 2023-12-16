@@ -290,6 +290,7 @@ name = "qwerk"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "crossbeam-channel",
  "crossbeam-queue",
  "crossbeam-utils",
