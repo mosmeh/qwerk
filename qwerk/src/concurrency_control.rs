@@ -23,6 +23,16 @@ pub trait ConcurrencyControlInternal: Send + Sync + 'static {
 
     fn init(gc_threshold: usize) -> Self;
 
+    /// Loads a log entry into `index`.
+    ///
+    /// This method is called when the database is opened and before any
+    /// transactions are started.
+    ///
+    /// Implementations should load the log entry
+    /// into `index`, and make sure a log entry with the largest `tid` for
+    /// `key` ends up in `index`.
+    ///
+    /// `value` of `None` means a tombstone.
     fn load_log_entry(
         index: &Index<Self::Record>,
         key: SmallBytes,
@@ -38,16 +48,34 @@ pub trait ConcurrencyControlInternal: Send + Sync + 'static {
 }
 
 pub trait TransactionExecutor {
+    /// Called before calls to other methods when a transaction begins.
     fn begin_transaction(&mut self) {}
+
+    /// Called after
+    /// - a successful call to `precommit`
+    /// - a call to `abort`.
     fn end_transaction(&mut self) {}
 
+    /// Reads a key-value pair from the transaction.
+    ///
+    /// Returns `None` if the key does not exist.
     fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>>;
+
+    /// Writes a key-value pair into the transaction.
+    ///
+    /// `value` of `None` means the key is removed.
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()>;
-    fn commit(&mut self, log_writer: &mut LogWriter) -> Result<Epoch>;
+
+    /// Attempts to commit the transaction.
+    ///
+    /// Implementations should write modified records to `log_writer`
+    /// if the commit succeeds.
+    /// Returns the commit epoch on success.
+    fn precommit(&mut self, log_writer: &mut LogWriter) -> Result<Epoch>;
 
     /// Aborts the transaction.
     ///
     /// Called when a user requests an abort, or when `Err` is returned from
-    /// `read`, `write`, or `commit`.
+    /// `read`, `write`, or `precommit`.
     fn abort(&mut self);
 }

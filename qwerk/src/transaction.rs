@@ -8,13 +8,16 @@ pub struct Transaction<'db, 'worker, C: ConcurrencyControl> {
 }
 
 impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
-    pub fn new(worker: &'worker mut Worker<'db, C>) -> Self {
+    pub(crate) fn new(worker: &'worker mut Worker<'db, C>) -> Self {
         Self {
             worker,
             is_active: true,
         }
     }
 
+    /// Returns the value corresponding to the key.
+    ///
+    /// Returns `None` if the key does not exist.
     pub fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<&[u8]>> {
         if !self.is_active {
             return Err(Error::AlreadyAborted);
@@ -56,11 +59,12 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
         })
     }
 
+    /// Removes a key from the database.
     pub fn remove<K: AsRef<[u8]>>(&mut self, key: K) -> Result<()> {
         self.try_mutate(|worker| worker.txn_executor.write(key.as_ref(), None))
     }
 
-    /// Commits the transaction.
+    /// Commits the transaction and waits until the commit is durable.
     ///
     /// Even if the transaction consists only of [`get`]s, the transaction
     /// must be committed and must succeed.
@@ -71,8 +75,26 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
     /// An epoch at which the transaction was committed.
     ///
     /// [`get`]: #method.get
-    pub fn commit(mut self) -> Result<Epoch> {
-        let epoch = self.try_mutate(|worker| worker.txn_executor.commit(&mut worker.log_writer))?;
+    pub fn commit(self) -> Result<Epoch> {
+        let persistent_epoch = self.worker.persistent_epoch;
+        let commit_epoch = self.precommit()?;
+        persistent_epoch.wait_for(commit_epoch);
+        Ok(commit_epoch)
+    }
+
+    /// Commits the transaction, but does not wait for durability.
+    /// This is useful when multiple transactions are committed in a batch.
+    ///
+    /// To make sure the transaction is durable, wait for the returned
+    /// commit epoch to be equal to or greater than [`Database::durable_epoch`].
+    ///
+    /// For other remarks, see [`commit`].
+    ///
+    /// [`Database::durable_epoch`]: crate::Database#method.durable_epoch
+    /// [`commit`]: #method.commit
+    pub fn precommit(mut self) -> Result<Epoch> {
+        let epoch =
+            self.try_mutate(|worker| worker.txn_executor.precommit(&mut worker.log_writer))?;
         self.worker.txn_executor.end_transaction();
         self.is_active = false;
         Ok(epoch)

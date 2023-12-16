@@ -54,11 +54,14 @@ fn run<C: ConcurrencyControl>() -> Result<()> {
     txn.remove(b"bob")?;
     txn.abort();
 
-    // When `commit()` returns, a transaction is not guaranteed to be durable
-    // yet. Transactions are made durable periodically by background threads
-    // or when `flush()` is called.
+    // When committing multiple transactions in a batch, you can make use of
+    // `precommit` that commits the transaction but does not wait for
+    // durability. In this way, writes to the disk can be batched and
+    // the performance is improved.
+    // Transactions are made durable periodically by background threads
+    // or when `flush` is called.
     // You can check if the transaction became durable by comparing
-    // the commit epoch returned by `commit()` and the durable epoch of
+    // the commit epoch returned by `precommit` and the durable epoch of
     // the database.
 
     let mut txn = worker.begin_transaction();
@@ -66,13 +69,13 @@ fn run<C: ConcurrencyControl>() -> Result<()> {
     assert_eq!(txn.get(b"bob")?, Some(b"bar".as_slice()));
     txn.insert(b"alice", b"qux")?;
     txn.remove(b"bob")?;
-    let commit_epoch1 = txn.commit()?;
+    let commit_epoch1 = txn.precommit()?;
 
     let mut txn = worker.begin_transaction();
     assert_eq!(txn.get(b"alice")?, Some(b"qux".as_slice()));
     assert!(txn.get(b"bob")?.is_none());
     txn.insert(b"carol", b"quux")?;
-    let commit_epoch2 = txn.commit()?;
+    let commit_epoch2 = txn.precommit()?;
 
     assert!(commit_epoch1 <= commit_epoch2);
 

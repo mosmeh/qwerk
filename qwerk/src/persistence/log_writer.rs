@@ -6,7 +6,7 @@ use crate::{
 };
 use crossbeam_channel::{Receiver, Sender};
 use crossbeam_queue::ArrayQueue;
-use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
+use parking_lot::{Condvar, MappedMutexGuard, Mutex, MutexGuard};
 use std::{
     cell::OnceCell,
     fs::{DirBuilder, File},
@@ -22,7 +22,7 @@ use std::{
 pub struct Config {
     pub dir: PathBuf,
     pub epoch_fw: Arc<EpochFramework>,
-    pub persisted_durable_epoch: PersistedDurableEpoch,
+    pub persistent_epoch: Arc<PersistentEpoch>,
     pub flushing_threads: usize,
     pub preallocated_buffer_size: usize,
     pub buffers_per_writer: usize,
@@ -104,10 +104,6 @@ impl Logger {
         }
     }
 
-    pub fn durable_epoch(&self) -> Epoch {
-        self.config.persisted_durable_epoch.get()
-    }
-
     /// Makes sure that all the logs written before this call are durable.
     ///
     /// Returns the durable epoch after the flush.
@@ -129,7 +125,7 @@ impl Logger {
             channel.durable_epoch.fetch_max(reclamation_epoch.0, SeqCst);
         }
         self.config
-            .persisted_durable_epoch
+            .persistent_epoch
             .update(&self.channels, self.config.fsync)
     }
 }
@@ -193,7 +189,7 @@ fn run_daemon(
 
         // 3. Update and persist the global durable epoch.
         config
-            .persisted_durable_epoch
+            .persistent_epoch
             .update(channels, config.fsync)
             .unwrap();
 
@@ -202,16 +198,17 @@ fn run_daemon(
 }
 
 /// Global durable epoch persisted to the disk.
-pub struct PersistedDurableEpoch {
+pub struct PersistentEpoch {
     path: PathBuf,
     tmp_path: PathBuf,
-    epoch: AtomicU32,
 
-    /// A mutex guarding modification of `epoch` and the file (`path`).
-    mutex: Mutex<()>,
+    /// This mutex also guards the file at `path`.
+    durable_epoch: Mutex<Epoch>,
+
+    condvar: Condvar,
 }
 
-impl PersistedDurableEpoch {
+impl PersistentEpoch {
     pub fn new(dir: &Path) -> Result<Self> {
         const FILE_SIZE: usize = std::mem::size_of::<Epoch>();
 
@@ -229,21 +226,32 @@ impl PersistedDurableEpoch {
         Ok(Self {
             path,
             tmp_path: dir.join("durable_epoch.tmp"),
-            epoch: epoch.into(),
-            mutex: Default::default(),
+            durable_epoch: Epoch(epoch).into(),
+            condvar: Default::default(),
         })
     }
 
     pub fn get(&self) -> Epoch {
-        Epoch(self.epoch.load(SeqCst))
+        *self.durable_epoch.lock()
+    }
+
+    /// Waits until the global durable epoch is equal to or greater than
+    /// the given epoch.
+    ///
+    /// Returns the global durable epoch after the wait.
+    pub fn wait_for(&self, epoch: Epoch) -> Epoch {
+        let mut durable_epoch = self.durable_epoch.lock();
+        self.condvar
+            .wait_while(&mut durable_epoch, |durable_epoch| *durable_epoch < epoch);
+        *durable_epoch
     }
 
     /// Updates the global durable epoch to the minimum durable epoch of
     /// all channels.
     ///
-    /// Returns the new durable epoch.
+    /// Returns the new global durable epoch.
     fn update(&self, channels: &SlottedCell<LogChannel>, fsync: bool) -> std::io::Result<Epoch> {
-        let _guard = self.mutex.lock();
+        let mut guard = self.durable_epoch.lock();
 
         let mut min_epoch = None;
         for channel in channels.iter() {
@@ -253,7 +261,7 @@ impl PersistedDurableEpoch {
             }
         }
 
-        let prev_durable_epoch = self.get();
+        let prev_durable_epoch = *guard;
         let Some(new_durable_epoch) = min_epoch else {
             return Ok(prev_durable_epoch);
         };
@@ -282,8 +290,10 @@ impl PersistedDurableEpoch {
         std::fs::rename(&self.tmp_path, &self.path)?;
         // TODO: fsync the parent directory.
 
-        self.epoch.store(new_durable_epoch.0, SeqCst);
+        *guard = new_durable_epoch;
+        drop(guard);
 
+        self.condvar.notify_all();
         Ok(new_durable_epoch)
     }
 }
