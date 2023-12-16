@@ -199,7 +199,9 @@ impl<C: ConcurrencyControl> Database<C> {
 
     /// Makes sure the changes made by all committed transactions are persisted
     /// to the disk.
-    pub fn flush(&self) -> std::io::Result<()> {
+    ///
+    /// Returns the durable epoch after the flush.
+    pub fn flush(&self) -> std::io::Result<Epoch> {
         self.logger.flush()
     }
 }

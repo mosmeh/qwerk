@@ -21,14 +21,18 @@ const RECLAMATION_EPOCH_OFFSET: u32 = 2;
 const OFFLINE_EPOCH: u32 = u32::MAX;
 
 /// A unit of time for concurrency control and durability.
+///
+/// Epochs are represented as integers that are non-decreasing over time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Epoch(pub u32);
 
 impl Epoch {
-    pub const ZERO: Self = Self(0);
-
-    pub const fn increment(self) -> Self {
+    pub(crate) const fn increment(self) -> Self {
         Self(self.0 + 1)
+    }
+
+    pub(crate) const fn decrement(self) -> Self {
+        Self(self.0 - 1)
     }
 }
 
@@ -84,6 +88,10 @@ impl EpochFramework {
 
     pub const fn epoch_duration(&self) -> Duration {
         self.epoch_duration
+    }
+
+    pub fn global_epoch(&self) -> Epoch {
+        Epoch(self.shared.global_epoch.load(SeqCst))
     }
 
     /// Returns the reclamation epoch.
