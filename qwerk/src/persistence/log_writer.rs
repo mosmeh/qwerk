@@ -99,7 +99,7 @@ impl Logger {
         LogWriter {
             channel: self
                 .channels
-                .alloc_with(|index| LogChannel::new(index, self.config.clone())),
+                .alloc_with(|index| LogChannel::new(index, self.config.clone()).unwrap()),
             flush_req_tx: self.flush_req_tx.clone().unwrap(),
         }
     }
@@ -109,7 +109,9 @@ impl Logger {
     }
 
     /// Makes sure that all the logs written before this call are durable.
-    pub fn flush(&self) -> std::io::Result<()> {
+    ///
+    /// Returns the durable epoch after the flush.
+    pub fn flush(&self) -> std::io::Result<Epoch> {
         let reclamation_epoch = self.config.epoch_fw.sync();
         for channel in self.channels.iter() {
             let mut producer = channel.producer.lock();
@@ -123,11 +125,10 @@ impl Logger {
 
             // The next log buffer that will be queued to the channel will
             // have an epoch > reclamation_epoch. Thus, we are sure that
-            // durable_epoch is at least reclamation_epoch.
+            // durable_epoch >= reclamation_epoch.
             channel.durable_epoch.fetch_max(reclamation_epoch.0, SeqCst);
         }
-        self.config.persisted_durable_epoch.update(&self.channels)?;
-        Ok(())
+        self.config.persisted_durable_epoch.update(&self.channels)
     }
 }
 
@@ -181,8 +182,7 @@ fn run_daemon(
             if channel.flush_queue.is_empty() {
                 // The next log buffer that will be queued to the channel
                 // will have an epoch > reclamation_epoch.
-                // Thus, we are sure that durable_epoch is at least
-                // reclamation_epoch.
+                // Thus, we are sure that durable_epoch is >= reclamation_epoch.
                 channel
                     .durable_epoch
                     .fetch_max(config.epoch_fw.reclamation_epoch().0, SeqCst);
@@ -201,6 +201,8 @@ pub struct PersistedDurableEpoch {
     path: PathBuf,
     tmp_path: PathBuf,
     epoch: AtomicU32,
+
+    /// A mutex guarding modification of `epoch` and the file (`path`).
     mutex: Mutex<()>,
 }
 
@@ -229,40 +231,50 @@ impl PersistedDurableEpoch {
 
     /// Updates the global durable epoch to the minimum durable epoch of
     /// all channels.
-    fn update(&self, channels: &SlottedCell<LogChannel>) -> std::io::Result<()> {
+    ///
+    /// Returns the new durable epoch.
+    fn update(&self, channels: &SlottedCell<LogChannel>) -> std::io::Result<Epoch> {
         let _guard = self.mutex.lock();
 
         let mut min_epoch = None;
         for channel in channels.iter() {
-            let Some(durable_epoch) = channel.durable_epoch() else {
-                // This channel has not flushed anything yet.
-                // We would underestimate the durable epoch if we skip
-                // this channel, so we don't update the durable epoch.
-                return Ok(());
-            };
+            let epoch = channel.durable_epoch();
             match min_epoch {
-                Some(min_epoch) if min_epoch <= durable_epoch => (),
-                _ => min_epoch = Some(durable_epoch),
+                Some(min_epoch) if min_epoch <= epoch => (),
+                _ => min_epoch = Some(epoch),
             }
         }
-        let Some(new_epoch) = min_epoch else {
-            return Ok(());
+
+        let prev_durable_epoch = self.get();
+        let Some(new_durable_epoch) = min_epoch else {
+            return Ok(prev_durable_epoch);
         };
 
+        // This holds because
+        // - durable_epochs of channels are non-decreasing
+        // - When a new channel is created,
+        //   new_durable_epoch >= (the new channel's durable_epoch) (Because we take minimum among all channels)
+        //                      = global_epoch - 1                  (See LogChannel::new)
+        //                     >= prev_durable_epoch.               (See LogChannel::flush)
+        assert!(prev_durable_epoch <= new_durable_epoch);
+
+        if new_durable_epoch == prev_durable_epoch {
+            return Ok(new_durable_epoch);
+        }
+
         {
-            let mut tmp_pepoch = File::create(&self.tmp_path)?;
-            tmp_pepoch.write_all(&new_epoch.0.to_le_bytes())?;
-            tmp_pepoch.sync_data()?;
+            let mut file = File::create(&self.tmp_path)?;
+            file.write_all(&new_durable_epoch.0.to_le_bytes())?;
+            file.sync_data()?;
         }
 
         // Atomically replace the file.
         std::fs::rename(&self.tmp_path, &self.path)?;
         // TODO: fsync the parent directory.
 
-        let prev_epoch = Epoch(self.epoch.swap(new_epoch.0, SeqCst));
-        assert!(prev_epoch <= new_epoch);
+        self.epoch.store(new_durable_epoch.0, SeqCst);
 
-        Ok(())
+        Ok(new_durable_epoch)
     }
 }
 
@@ -360,7 +372,6 @@ impl<'a> ReservedCapacity<'a> {
         let num_records_offset = buf.bytes.len();
         buf.bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // placeholder
 
-        // Epoch must be monotonically increasing.
         let epoch = tid.epoch();
         let min_epoch = *buf.min_epoch.get_or_init(|| epoch);
         assert!(min_epoch <= epoch);
@@ -440,44 +451,51 @@ pub struct LogChannel {
     config: Arc<Config>,
     flush_queue: ArrayQueue<LogBuf>,
     durable_epoch: AtomicU32,
+
+    /// This mutex also guards push to `flush_queue`.
     producer: Mutex<Producer>,
+
+    /// This mutex also guards
+    /// - pop from `flush_queue`
+    /// - update of `durable_epoch`
     consumer: Mutex<Consumer>,
 }
 
 impl LogChannel {
-    fn new(index: usize, config: Arc<Config>) -> Self {
+    fn new(index: usize, config: Arc<Config>) -> std::io::Result<Self> {
         let path = config
             .dir
             .join(format!("{}{}", super::LOG_FILE_NAME_PREFIX, index));
-        let file = File::create(path).unwrap();
+        let file = File::create(path)?;
+
         let flush_queue = ArrayQueue::new(config.buffers_per_writer);
+
+        // The first log buffer that will be queued to the channel will have
+        // an epoch >= global_epoch.
+        let durable_epoch = config.epoch_fw.global_epoch().decrement();
+
         let (free_bufs_tx, free_bufs_rx) = crossbeam_channel::bounded(config.buffers_per_writer);
         for _ in 0..config.buffers_per_writer {
             free_bufs_tx
                 .try_send(Vec::with_capacity(config.preallocated_buffer_size))
                 .unwrap();
         }
-        Self {
+
+        Ok(Self {
             index,
             config,
             flush_queue,
-            durable_epoch: Default::default(),
+            durable_epoch: durable_epoch.0.into(),
             producer: Mutex::new(Producer {
                 current_buf: Default::default(),
                 free_bufs_rx,
             }),
             consumer: Mutex::new(Consumer { file, free_bufs_tx }),
-        }
+        })
     }
 
-    fn durable_epoch(&self) -> Option<Epoch> {
-        // durable_epoch is zero if no flush has happened yet.
-        let epoch = self.durable_epoch.load(SeqCst);
-        if epoch > 0 {
-            Some(Epoch(epoch))
-        } else {
-            None
-        }
+    fn durable_epoch(&self) -> Epoch {
+        Epoch(self.durable_epoch.load(SeqCst))
     }
 
     fn queue(&self, buf: LogBuf) {
@@ -504,7 +522,7 @@ impl LogChannel {
         let mut bufs_to_flush = Vec::with_capacity(self.config.buffers_per_writer);
         let mut min_epoch = OnceCell::new();
         while let Some(buf) = self.flush_queue.pop() {
-            // Epoch must be monotonically increasing.
+            // Epoch must be non-decreasing.
             let buf_min_epoch = *buf.min_epoch.get().unwrap();
             match min_epoch.get() {
                 Some(&min_epoch) => assert!(min_epoch <= buf_min_epoch),
@@ -514,7 +532,13 @@ impl LogChannel {
             assert!(!buf.bytes.is_empty());
             bufs_to_flush.push(buf.bytes);
         }
+
+        // Because the epoch queued to the channel is non-decreasing,
+        // we are sure that epochs <= min_epoch - 1 will be never queued to the
+        // channel. So we can declare that min_epoch - 1 is durable after
+        // the flush.
         let next_durable_epoch = Epoch(min_epoch.take().unwrap().0 - 1);
+
         assert!(!bufs_to_flush.is_empty());
         assert!(bufs_to_flush.len() <= self.config.buffers_per_writer);
 

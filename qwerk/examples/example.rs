@@ -76,8 +76,8 @@ fn run<C: ConcurrencyControl>() -> Result<()> {
 
     assert!(commit_epoch1 <= commit_epoch2);
 
-    db.flush()?;
-    assert!(db.durable_epoch() >= commit_epoch2);
+    let durable_epoch = db.flush()?;
+    assert!(durable_epoch >= commit_epoch2);
 
     Ok(())
 }
