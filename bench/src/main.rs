@@ -232,7 +232,7 @@ fn run_worker<C: ConcurrencyControl>(
         let key = i.to_ne_bytes();
         let mut txn = worker.begin_transaction();
         txn.insert(key, &payload).unwrap();
-        txn.commit().unwrap();
+        txn.precommit().unwrap();
     }
 
     shared.barrier.wait();
@@ -262,7 +262,7 @@ fn run_worker<C: ConcurrencyControl>(
                 }
             }
         }
-        let result = txn.commit();
+        let result = txn.precommit();
         if !shared.is_running.load(Ordering::Relaxed) {
             break;
         }

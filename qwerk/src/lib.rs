@@ -15,7 +15,7 @@ pub use transaction::Transaction;
 
 use concurrency_control::TransactionExecutor;
 use epoch::EpochFramework;
-use persistence::{LogWriter, Logger, LoggerConfig, PersistedDurableEpoch};
+use persistence::{LogWriter, Logger, LoggerConfig, PersistentEpoch};
 use scc::HashIndex;
 use shared::Shared;
 use small_bytes::SmallBytes;
@@ -86,18 +86,20 @@ impl DatabaseOptions {
             return Err(Error::Corrupted);
         }
 
-        let persisted_durable_epoch = PersistedDurableEpoch::new(dir)?;
-        let durable_epoch = persisted_durable_epoch.get();
+        let persistent_epoch = PersistentEpoch::new(dir)?;
+        let durable_epoch = persistent_epoch.get();
         let index = persistence::recover::<C>(dir, durable_epoch, self.background_threads)?;
 
         let epoch_fw = Arc::new(EpochFramework::new(epoch::Config {
             initial_epoch: durable_epoch.increment(),
             epoch_duration: self.epoch_duration,
         }));
+
+        let persistent_epoch = Arc::new(persistent_epoch);
         let logger = Logger::new(LoggerConfig {
             dir: dir.to_path_buf(),
             epoch_fw: epoch_fw.clone(),
-            persisted_durable_epoch,
+            persistent_epoch: persistent_epoch.clone(),
             flushing_threads: self.background_threads,
             preallocated_buffer_size: self.log_buffer_size_bytes,
             buffers_per_writer: self.log_buffers_per_worker,
@@ -110,6 +112,7 @@ impl DatabaseOptions {
             concurrency_control,
             epoch_fw,
             logger,
+            persistent_epoch,
         })
     }
 
@@ -167,6 +170,7 @@ pub struct Database<C: ConcurrencyControl> {
     concurrency_control: C,
     epoch_fw: Arc<EpochFramework>,
     logger: Logger,
+    persistent_epoch: Arc<PersistentEpoch>,
 }
 
 impl<C: ConcurrencyControl> Database<C> {
@@ -186,6 +190,7 @@ impl<C: ConcurrencyControl> Database<C> {
                 .concurrency_control
                 .spawn_executor(&self.index, epoch_guard),
             log_writer: self.logger.spawn_writer(),
+            persistent_epoch: &self.persistent_epoch,
         }
     }
 
@@ -194,7 +199,7 @@ impl<C: ConcurrencyControl> Database<C> {
     /// The durable epoch is the epoch up to which all changes made by
     /// committed transactions are guaranteed to be durable.
     pub fn durable_epoch(&self) -> Epoch {
-        self.logger.durable_epoch()
+        self.persistent_epoch.get()
     }
 
     /// Makes sure the changes made by all committed transactions are persisted
@@ -210,8 +215,6 @@ impl<C: ConcurrencyControl> Drop for Database<C> {
     fn drop(&mut self) {
         let guard = scc::ebr::Guard::new();
         for (_, record_ptr) in self.index.iter(&guard) {
-            // SAFETY: Since we have &mut self, all Executors have already been
-            //         dropped, so no one is holding record pointers now.
             unsafe { record_ptr.drop_in_place() };
         }
     }
@@ -220,6 +223,7 @@ impl<C: ConcurrencyControl> Drop for Database<C> {
 pub struct Worker<'a, C: ConcurrencyControl + 'a> {
     txn_executor: C::Executor<'a>,
     log_writer: LogWriter<'a>,
+    persistent_epoch: &'a PersistentEpoch,
 }
 
 static_assertions::assert_not_impl_any!(Worker<'_, Pessimistic>: Send, Sync);

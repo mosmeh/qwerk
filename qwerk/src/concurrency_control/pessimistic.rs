@@ -266,7 +266,7 @@ impl TransactionExecutor for Executor<'_> {
         Ok(())
     }
 
-    fn commit(&mut self, log_writer: &mut LogWriter) -> Result<Epoch> {
+    fn precommit(&mut self, log_writer: &mut LogWriter) -> Result<Epoch> {
         let mut tid_set = self.tid_generator.begin_transaction();
         let mut log_capacity_reserver = log_writer.reserver();
         for item in &self.rw_set {

@@ -40,7 +40,6 @@ fn main() -> Result<()> {
             }
             txn.insert(&key, &value)?;
             txn.commit()?;
-            db.flush()?;
         }
         Command::Remove { key } => {
             let mut worker = db.spawn_worker();
@@ -50,7 +49,6 @@ fn main() -> Result<()> {
             }
             txn.remove(&key)?;
             txn.commit()?;
-            db.flush()?;
         }
         Command::Epoch => println!("{}", db.durable_epoch().0),
     }
