@@ -65,8 +65,8 @@ impl Logger {
                             // or are being flushed by other flushers.
                             continue;
                         }
-                        let mut consumer = channel.consumer.lock();
-                        channel.flush(&mut consumer).unwrap();
+                        let mut state = channel.flush_state.lock();
+                        channel.flush(&mut state).unwrap();
                     }
                 })
             })
@@ -114,13 +114,13 @@ impl Logger {
     pub fn flush(&self) -> std::io::Result<Epoch> {
         let reclamation_epoch = self.config.epoch_fw.sync();
         for channel in self.channels.iter() {
-            let mut producer = channel.producer.lock();
-            if let Some(buf) = producer.take_queueable_buf() {
+            let mut write_state = channel.write_state.lock();
+            if let Some(buf) = write_state.take_queueable_buf() {
                 channel.queue(buf);
             }
 
-            let mut consumer = channel.consumer.lock();
-            channel.flush(&mut consumer)?;
+            let mut flush_state = channel.flush_state.lock();
+            channel.flush(&mut flush_state)?;
             assert!(channel.flush_queue.is_empty());
 
             // The next log buffer that will be queued to the channel will
@@ -128,7 +128,9 @@ impl Logger {
             // durable_epoch >= reclamation_epoch.
             channel.durable_epoch.fetch_max(reclamation_epoch.0, SeqCst);
         }
-        self.config.persisted_durable_epoch.update(&self.channels)
+        self.config
+            .persisted_durable_epoch
+            .update(&self.channels, self.config.fsync)
     }
 }
 
@@ -164,19 +166,19 @@ fn run_daemon(
             // Failure of this lock means that a writer is writing to
             // the buffer. In that case we can just let the writer
             // queue the buffer by itself if needed.
-            let Some(mut producer) = channel.producer.try_lock() else {
+            let Some(mut write_state) = channel.write_state.try_lock() else {
                 continue;
             };
 
             // 1. Queue current_buf to flush_queue.
-            if let Some(buf) = producer.take_queueable_buf() {
+            if let Some(buf) = write_state.take_queueable_buf() {
                 channel.queue(buf);
                 channel.request_flush(&flush_req_tx);
                 continue;
             }
 
             // 2. Bump durable_epoch of channels that have no activity.
-            let Some(_consumer) = channel.consumer.try_lock() else {
+            let Some(_flush_state) = channel.flush_state.try_lock() else {
                 continue;
             };
             if channel.flush_queue.is_empty() {
@@ -190,7 +192,10 @@ fn run_daemon(
         }
 
         // 3. Update and persist the global durable epoch.
-        config.persisted_durable_epoch.update(channels).unwrap();
+        config
+            .persisted_durable_epoch
+            .update(channels, config.fsync)
+            .unwrap();
 
         std::thread::sleep(config.epoch_fw.epoch_duration());
     }
@@ -233,15 +238,14 @@ impl PersistedDurableEpoch {
     /// all channels.
     ///
     /// Returns the new durable epoch.
-    fn update(&self, channels: &SlottedCell<LogChannel>) -> std::io::Result<Epoch> {
+    fn update(&self, channels: &SlottedCell<LogChannel>, fsync: bool) -> std::io::Result<Epoch> {
         let _guard = self.mutex.lock();
 
         let mut min_epoch = None;
         for channel in channels.iter() {
             let epoch = channel.durable_epoch();
-            match min_epoch {
-                Some(min_epoch) if min_epoch <= epoch => (),
-                _ => min_epoch = Some(epoch),
+            if min_epoch.map(|min_epoch| epoch < min_epoch).unwrap_or(true) {
+                min_epoch = Some(epoch);
             }
         }
 
@@ -265,7 +269,9 @@ impl PersistedDurableEpoch {
         {
             let mut file = File::create(&self.tmp_path)?;
             file.write_all(&new_durable_epoch.0.to_le_bytes())?;
-            file.sync_data()?;
+            if fsync {
+                file.sync_data()?;
+            }
         }
 
         // Atomically replace the file.
@@ -326,26 +332,26 @@ impl<'a> CapacityReserver<'a> {
 
     pub fn finish(self) -> ReservedCapacity<'a> {
         let size = self.writer.channel.config.preallocated_buffer_size;
-        let mut producer = self.writer.channel.producer.lock();
-        if producer
+        let mut state = self.writer.channel.write_state.lock();
+        if state
             .current_buf
             .as_ref()
             .map(|buf| !buf.bytes.is_empty() && buf.bytes.len() + self.num_bytes > size)
             .unwrap_or_default()
         {
             self.writer
-                .queue_and_request_flush(producer.current_buf.take().unwrap());
+                .queue_and_request_flush(state.current_buf.take().unwrap());
         }
 
-        if producer.current_buf.is_none() {
-            let bytes = producer.free_bufs_rx.recv().unwrap();
+        if state.current_buf.is_none() {
+            let bytes = state.free_bufs_rx.recv().unwrap();
             assert!(bytes.is_empty());
-            producer.current_buf = Some(LogBuf::new(bytes));
+            state.current_buf = Some(LogBuf::new(bytes));
         }
 
         // The buffer can exceed the preallocated size if the single transaction
         // is too large.
-        producer
+        state
             .current_buf
             .as_mut()
             .unwrap()
@@ -354,7 +360,7 @@ impl<'a> CapacityReserver<'a> {
 
         ReservedCapacity {
             writer: self.writer,
-            buf: MutexGuard::map(producer, |producer| &mut producer.current_buf),
+            buf: MutexGuard::map(state, |state| &mut state.current_buf),
         }
     }
 }
@@ -424,12 +430,12 @@ impl Drop for Entry<'_> {
     }
 }
 
-struct Producer {
+struct WriteState {
     current_buf: Option<LogBuf>,
     free_bufs_rx: Receiver<Vec<u8>>,
 }
 
-impl Producer {
+impl WriteState {
     fn take_queueable_buf(&mut self) -> Option<LogBuf> {
         if let Some(buf) = &mut self.current_buf {
             if !buf.bytes.is_empty() {
@@ -441,7 +447,7 @@ impl Producer {
     }
 }
 
-struct Consumer {
+struct FlushState {
     file: File,
     free_bufs_tx: Sender<Vec<u8>>,
 }
@@ -453,12 +459,12 @@ pub struct LogChannel {
     durable_epoch: AtomicU32,
 
     /// This mutex also guards push to `flush_queue`.
-    producer: Mutex<Producer>,
+    write_state: Mutex<WriteState>,
 
     /// This mutex also guards
     /// - pop from `flush_queue`
     /// - update of `durable_epoch`
-    consumer: Mutex<Consumer>,
+    flush_state: Mutex<FlushState>,
 }
 
 impl LogChannel {
@@ -486,11 +492,11 @@ impl LogChannel {
             config,
             flush_queue,
             durable_epoch: durable_epoch.0.into(),
-            producer: Mutex::new(Producer {
+            write_state: Mutex::new(WriteState {
                 current_buf: Default::default(),
                 free_bufs_rx,
             }),
-            consumer: Mutex::new(Consumer { file, free_bufs_tx }),
+            flush_state: Mutex::new(FlushState { file, free_bufs_tx }),
         })
     }
 
@@ -512,7 +518,7 @@ impl LogChannel {
             .unwrap();
     }
 
-    fn flush(&self, consumer: &mut Consumer) -> std::io::Result<()> {
+    fn flush(&self, state: &mut FlushState) -> std::io::Result<()> {
         if self.flush_queue.is_empty() {
             return Ok(());
         }
@@ -520,14 +526,13 @@ impl LogChannel {
         assert!(self.flush_queue.len() <= self.config.buffers_per_writer);
 
         let mut bufs_to_flush = Vec::with_capacity(self.config.buffers_per_writer);
-        let mut min_epoch = OnceCell::new();
+        let min_epoch = OnceCell::new();
         while let Some(buf) = self.flush_queue.pop() {
-            // Epoch must be non-decreasing.
+            // Epoch is non-decreasing, so the first buffer has
+            // the smallest epoch.
             let buf_min_epoch = *buf.min_epoch.get().unwrap();
-            match min_epoch.get() {
-                Some(&min_epoch) => assert!(min_epoch <= buf_min_epoch),
-                None => min_epoch.set(buf_min_epoch).unwrap(),
-            }
+            let min_epoch = min_epoch.get_or_init(|| buf_min_epoch);
+            assert!(buf_min_epoch >= *min_epoch);
 
             assert!(!buf.bytes.is_empty());
             bufs_to_flush.push(buf.bytes);
@@ -537,7 +542,7 @@ impl LogChannel {
         // we are sure that epochs <= min_epoch - 1 will be never queued to the
         // channel. So we can declare that min_epoch - 1 is durable after
         // the flush.
-        let next_durable_epoch = Epoch(min_epoch.take().unwrap().0 - 1);
+        let next_durable_epoch = min_epoch.get().unwrap().decrement();
 
         assert!(!bufs_to_flush.is_empty());
         assert!(bufs_to_flush.len() <= self.config.buffers_per_writer);
@@ -556,7 +561,7 @@ impl LogChannel {
             );
 
             // TODO: Use write_vectored_all once it is stabilized.
-            let result = consumer.file.write_vectored(&slices);
+            let result = state.file.write_vectored(&slices);
             match result {
                 Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
                 Ok(n) => {
@@ -573,7 +578,7 @@ impl LogChannel {
                     for bytes in &mut bufs_to_flush[start_buf_index..][..num_bufs_to_remove] {
                         let mut bytes = std::mem::take(bytes);
                         bytes.clear();
-                        consumer.free_bufs_tx.try_send(bytes).unwrap();
+                        state.free_bufs_tx.try_send(bytes).unwrap();
                     }
                     if num_bufs_to_remove > 0 {
                         start_buf_index += num_bufs_to_remove;
@@ -590,7 +595,7 @@ impl LogChannel {
         assert_eq!(start_buf_index, bufs_to_flush.len());
 
         if self.config.fsync {
-            consumer.file.sync_data()?;
+            state.file.sync_data()?;
         }
 
         let prev_durable_epoch = Epoch(self.durable_epoch.swap(next_durable_epoch.0, SeqCst));
@@ -608,6 +613,7 @@ struct LogBuf {
 
 impl LogBuf {
     fn new(bytes: Vec<u8>) -> Self {
+        assert!(bytes.is_empty());
         Self {
             bytes,
             min_epoch: Default::default(),
