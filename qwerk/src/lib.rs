@@ -51,7 +51,6 @@ pub struct DatabaseOptions {
     gc_threshold: usize,
     log_buffer_size_bytes: usize,
     log_buffers_per_worker: usize,
-    fsync: bool,
 }
 
 impl Default for DatabaseOptions {
@@ -65,7 +64,6 @@ impl Default for DatabaseOptions {
             gc_threshold: 4096,
             log_buffer_size_bytes: 1024 * 1024,
             log_buffers_per_worker: 8,
-            fsync: true,
         }
     }
 }
@@ -103,7 +101,6 @@ impl DatabaseOptions {
             flushing_threads: self.background_threads,
             preallocated_buffer_size: self.log_buffer_size_bytes,
             buffers_per_writer: self.log_buffers_per_worker,
-            fsync: self.fsync,
         })?;
         let concurrency_control = C::init(self.gc_threshold);
 
@@ -147,12 +144,6 @@ impl DatabaseOptions {
     /// The number of log buffers per worker. Defaults to 8.
     pub const fn log_buffers_per_worker(mut self, n: usize) -> Self {
         self.log_buffers_per_worker = n;
-        self
-    }
-
-    /// Whether to call `fsync` after writing to a disk. Defaults to `true`.
-    pub const fn fsync(mut self, yes: bool) -> Self {
-        self.fsync = yes;
         self
     }
 }
