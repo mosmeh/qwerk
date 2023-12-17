@@ -5,6 +5,7 @@ mod lock;
 mod persistence;
 mod qsbr;
 mod shared;
+mod signal_channel;
 mod slotted_cell;
 mod small_bytes;
 mod tid;
