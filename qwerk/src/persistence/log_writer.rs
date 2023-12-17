@@ -26,7 +26,6 @@ pub struct Config {
     pub flushing_threads: usize,
     pub preallocated_buffer_size: usize,
     pub buffers_per_writer: usize,
-    pub fsync: bool,
 }
 
 /// A redo logger.
@@ -124,9 +123,7 @@ impl Logger {
             // durable_epoch >= reclamation_epoch.
             channel.durable_epoch.fetch_max(reclamation_epoch.0, SeqCst);
         }
-        self.config
-            .persistent_epoch
-            .update(&self.channels, self.config.fsync)
+        self.config.persistent_epoch.update(&self.channels)
     }
 }
 
@@ -188,10 +185,7 @@ fn run_daemon(
         }
 
         // 3. Update and persist the global durable epoch.
-        config
-            .persistent_epoch
-            .update(channels, config.fsync)
-            .unwrap();
+        config.persistent_epoch.update(channels).unwrap();
 
         std::thread::sleep(config.epoch_fw.epoch_duration());
     }
@@ -250,7 +244,7 @@ impl PersistentEpoch {
     /// all channels.
     ///
     /// Returns the new global durable epoch.
-    fn update(&self, channels: &SlottedCell<LogChannel>, fsync: bool) -> std::io::Result<Epoch> {
+    fn update(&self, channels: &SlottedCell<LogChannel>) -> std::io::Result<Epoch> {
         let mut guard = self.durable_epoch.lock();
 
         let mut min_epoch = None;
@@ -281,9 +275,7 @@ impl PersistentEpoch {
         {
             let mut file = File::create(&self.tmp_path)?;
             file.write_all(&new_durable_epoch.0.to_le_bytes())?;
-            if fsync {
-                file.sync_data()?;
-            }
+            file.sync_data()?;
         }
 
         // Atomically replace the file.
@@ -608,9 +600,7 @@ impl LogChannel {
         }
         assert_eq!(start_buf_index, bufs_to_flush.len());
 
-        if self.config.fsync {
-            state.file.sync_data()?;
-        }
+        state.file.sync_data()?;
 
         let prev_durable_epoch = Epoch(self.durable_epoch.swap(next_durable_epoch.0, SeqCst));
         assert!(prev_durable_epoch <= next_durable_epoch);
