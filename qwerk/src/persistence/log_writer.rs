@@ -1,11 +1,11 @@
 use crate::{
     bytes_ext::{ByteVecExt, BytesExt},
     epoch::{Epoch, EpochFramework},
+    signal_channel,
     slotted_cell::{Slot, SlottedCell},
     tid::Tid,
     Error, Result,
 };
-use crossbeam_channel::{Receiver, Sender};
 use crossbeam_queue::ArrayQueue;
 use parking_lot::{Condvar, MappedMutexGuard, Mutex, MutexGuard};
 use std::{
@@ -14,7 +14,7 @@ use std::{
     io::{IoSlice, Read, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering::SeqCst},
+        atomic::{AtomicU32, Ordering::SeqCst},
         Arc,
     },
     thread::JoinHandle,
@@ -33,10 +33,10 @@ pub struct Config {
 pub struct Logger {
     config: Arc<Config>,
     channels: Arc<SlottedCell<LogChannel>>,
-    flush_req_tx: Option<Sender<FlushRequest>>,
+    flush_req_tx: Option<crossbeam_channel::Sender<FlushRequest>>,
     flushers: Vec<JoinHandle<()>>,
     daemon: Option<JoinHandle<()>>,
-    is_running: Arc<AtomicBool>,
+    stop_tx: signal_channel::Sender,
 }
 
 impl Logger {
@@ -73,15 +73,14 @@ impl Logger {
             .collect();
 
         let config = Arc::new(config);
-        let is_running = Arc::new(AtomicBool::new(true));
+        let (stop_tx, stop_rx) = signal_channel::channel();
         let daemon = {
             let config = config.clone();
             let channels = channels.clone();
             let flush_req_tx = flush_req_tx.clone();
-            let is_running = is_running.clone();
             std::thread::Builder::new()
                 .name("log_system_daemon".into())
-                .spawn(move || run_daemon(&config, &channels, flush_req_tx, &is_running))
+                .spawn(move || run_daemon(&config, &channels, flush_req_tx, stop_rx))
                 .unwrap()
         };
 
@@ -91,7 +90,7 @@ impl Logger {
             flush_req_tx: Some(flush_req_tx),
             flushers,
             daemon: Some(daemon),
-            is_running,
+            stop_tx,
         })
     }
 
@@ -130,7 +129,7 @@ impl Logger {
 
 impl Drop for Logger {
     fn drop(&mut self) {
-        self.is_running.store(false, SeqCst);
+        self.stop_tx.send();
         self.flush_req_tx.take().unwrap();
         self.daemon.take().unwrap().join().unwrap();
         for flusher in self.flushers.drain(..) {
@@ -152,10 +151,10 @@ impl Drop for Logger {
 fn run_daemon(
     config: &Config,
     channels: &SlottedCell<LogChannel>,
-    flush_req_tx: Sender<FlushRequest>,
-    is_running: &AtomicBool,
+    flush_req_tx: crossbeam_channel::Sender<FlushRequest>,
+    stop_rx: signal_channel::Receiver,
 ) {
-    while is_running.load(SeqCst) {
+    while !stop_rx.recv_timeout(config.epoch_fw.epoch_duration()) {
         for channel in channels.iter() {
             // Failure of this lock means that a writer is writing to
             // the buffer. In that case we can just let the writer
@@ -187,8 +186,6 @@ fn run_daemon(
 
         // 3. Update and persist the global durable epoch.
         config.persistent_epoch.update(channels).unwrap();
-
-        std::thread::sleep(config.epoch_fw.epoch_duration());
     }
 }
 
@@ -307,7 +304,7 @@ struct FlushRequest {
 
 pub struct LogWriter<'a> {
     channel: Slot<'a, LogChannel>,
-    flush_req_tx: Sender<FlushRequest>,
+    flush_req_tx: crossbeam_channel::Sender<FlushRequest>,
 }
 
 impl LogWriter<'_> {
@@ -427,7 +424,7 @@ impl Drop for Entry<'_> {
 
 struct WriteState {
     current_buf: Option<LogBuf>,
-    free_bufs_rx: Receiver<Vec<u8>>,
+    free_bufs_rx: crossbeam_channel::Receiver<Vec<u8>>,
 }
 
 impl WriteState {
@@ -444,7 +441,7 @@ impl WriteState {
 
 struct FlushState {
     file: File,
-    free_bufs_tx: Sender<Vec<u8>>,
+    free_bufs_tx: crossbeam_channel::Sender<Vec<u8>>,
 }
 
 pub struct LogChannel {
@@ -505,7 +502,7 @@ impl LogChannel {
         self.flush_queue.push(buf).unwrap();
     }
 
-    fn request_flush(&self, flush_req_tx: &Sender<FlushRequest>) {
+    fn request_flush(&self, flush_req_tx: &crossbeam_channel::Sender<FlushRequest>) {
         flush_req_tx
             .send(FlushRequest {
                 channel_index: self.index,
