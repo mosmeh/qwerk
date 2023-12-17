@@ -1,4 +1,5 @@
 use crate::{
+    bytes_ext::{ByteVecExt, BytesExt},
     epoch::{Epoch, EpochFramework},
     slotted_cell::{Slot, SlottedCell},
     tid::Tid,
@@ -199,7 +200,7 @@ pub struct PersistentEpoch {
     /// This mutex also guards the file at `path`.
     durable_epoch: Mutex<Epoch>,
 
-    condvar: Condvar,
+    update_condvar: Condvar,
 }
 
 impl PersistentEpoch {
@@ -221,7 +222,7 @@ impl PersistentEpoch {
             path,
             tmp_path: dir.join("durable_epoch.tmp"),
             durable_epoch: Epoch(epoch).into(),
-            condvar: Default::default(),
+            update_condvar: Default::default(),
         })
     }
 
@@ -235,7 +236,7 @@ impl PersistentEpoch {
     /// Returns the global durable epoch after the wait.
     pub fn wait_for(&self, epoch: Epoch) -> Epoch {
         let mut durable_epoch = self.durable_epoch.lock();
-        self.condvar
+        self.update_condvar
             .wait_while(&mut durable_epoch, |durable_epoch| *durable_epoch < epoch);
         *durable_epoch
     }
@@ -285,7 +286,7 @@ impl PersistentEpoch {
         *guard = new_durable_epoch;
         drop(guard);
 
-        self.condvar.notify_all();
+        self.update_condvar.notify_all();
         Ok(new_durable_epoch)
     }
 }
@@ -379,10 +380,10 @@ pub struct ReservedCapacity<'a> {
 impl<'a> ReservedCapacity<'a> {
     pub fn insert(mut self, tid: Tid) -> Entry<'a> {
         let buf = self.buf.as_mut().unwrap();
-        buf.bytes.extend_from_slice(&tid.0.to_le_bytes());
+        buf.bytes.write_u64(tid.0);
 
         let num_records_offset = buf.bytes.len();
-        buf.bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // placeholder
+        buf.bytes.write_u64(u64::MAX); // placeholder
 
         let epoch = tid.epoch();
         let min_epoch = *buf.min_epoch.get_or_init(|| epoch);
@@ -407,28 +408,16 @@ pub struct Entry<'a> {
 impl Entry<'_> {
     pub fn write(&mut self, key: &[u8], value: Option<&[u8]>) {
         let bytes = &mut self.buf.as_mut().unwrap().bytes;
-        bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(key);
-        match value {
-            Some(value) => {
-                bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
-                bytes.extend_from_slice(value);
-            }
-            None => {
-                // We can never hold u64::MAX bytes in memory.
-                // So we use u64::MAX to represent None.
-                bytes.extend_from_slice(&u64::MAX.to_le_bytes());
-            }
-        }
+        bytes.write_bytes(key);
+        bytes.write_maybe_bytes(value);
         self.num_records += 1;
     }
 }
 
 impl Drop for Entry<'_> {
     fn drop(&mut self) {
-        let bytes = self.buf.as_mut().unwrap().bytes.as_mut_slice();
-        bytes[self.num_records_offset..][..std::mem::size_of::<u64>()]
-            .copy_from_slice(&(self.num_records as u64).to_le_bytes());
+        let mut bytes = self.buf.as_mut().unwrap().bytes.as_mut_slice();
+        bytes.set_u64(self.num_records_offset, self.num_records as u64);
         if bytes.len() >= self.writer.channel.config.preallocated_buffer_size {
             self.writer
                 .queue_and_request_flush(self.buf.take().unwrap());
