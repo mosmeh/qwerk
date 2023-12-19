@@ -72,6 +72,6 @@ impl QsbrGuard<'_> {
 
 impl Drop for QsbrGuard<'_> {
     fn drop(&mut self) {
-        self.mark_as_offline()
+        self.mark_as_offline();
     }
 }
