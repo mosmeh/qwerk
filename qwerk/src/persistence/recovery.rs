@@ -2,6 +2,7 @@ use super::log_reader::LogReader;
 use crate::{record::Record, ConcurrencyControl, Epoch, Index};
 use crossbeam_queue::SegQueue;
 use std::{
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -9,7 +10,7 @@ use std::{
 pub fn recover<C: ConcurrencyControl>(
     dir: &Path,
     durable_epoch: Epoch,
-    num_threads: usize,
+    num_threads: NonZeroUsize,
 ) -> std::io::Result<Index<C::Record>> {
     let dir_entries = match std::fs::read_dir(dir) {
         Ok(dir_entries) => dir_entries,
@@ -27,7 +28,7 @@ pub fn recover<C: ConcurrencyControl>(
         return Ok(Default::default());
     }
 
-    let num_threads = num_threads.min(queue.len());
+    let num_threads = num_threads.get().min(queue.len());
     let shared = Arc::new(SharedState {
         index: Default::default(),
         queue,
