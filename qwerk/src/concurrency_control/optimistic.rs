@@ -467,6 +467,9 @@ impl Executor<'_> {
     }
 
     fn collect_garbage(&mut self) {
+        if self.garbage_values.is_empty() && self.garbage_records.is_empty() {
+            return;
+        }
         assert!(!self.qsbr_guard.is_online());
         self.global.qsbr.sync();
         self.garbage_values.clear();
@@ -484,9 +487,7 @@ impl Drop for Executor<'_> {
             self.process_removal_queue();
             backoff.snooze();
         }
-        if !self.garbage_values.is_empty() || !self.garbage_records.is_empty() {
-            self.collect_garbage();
-        }
+        self.collect_garbage();
     }
 }
 
@@ -523,10 +524,12 @@ impl Tid {
         self.0 & Self::LOCKED != 0
     }
 
+    #[must_use]
     const fn with_absent(self) -> Self {
         Self(self.0 | Self::ABSENT)
     }
 
+    #[must_use]
     const fn with_locked(self) -> Self {
         Self(self.0 | Self::LOCKED)
     }

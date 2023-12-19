@@ -333,7 +333,7 @@ impl<'a> KeyGenerator<'a> {
         has_insert: bool,
     ) -> Self {
         let max = record_count - 1;
-        let zeta2theta = (0..2).map(|i| 1.0 / f64::powf((i + 1) as f64, theta)).sum();
+        let zeta2theta = (0..2).map(|i| 1.0 / f64::powf((i + 1).into(), theta)).sum();
         let mut this = Self {
             max,
             theta,

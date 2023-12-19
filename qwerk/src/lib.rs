@@ -76,7 +76,7 @@ impl DatabaseOptions {
     }
 
     /// Opens a database at the given path, creating it if it does not exist.
-    pub fn open<C, P>(self, path: P) -> Result<Database<C>>
+    pub fn open<C, P>(&self, path: P) -> Result<Database<C>>
     where
         C: ConcurrencyControl,
         P: AsRef<Path>,
@@ -117,13 +117,13 @@ impl DatabaseOptions {
 
     /// The number of background threads used for logging and recovery.
     /// Defaults to the smaller of the number of CPU cores and 4.
-    pub const fn background_threads(mut self, n: usize) -> Self {
+    pub fn background_threads(&mut self, n: usize) -> &mut Self {
         self.background_threads = n;
         self
     }
 
     /// The duration of an epoch. Defaults to 40 milliseconds.
-    pub const fn epoch_duration(mut self, duration: Duration) -> Self {
+    pub fn epoch_duration(&mut self, duration: Duration) -> &mut Self {
         self.epoch_duration = duration;
         self
     }
@@ -131,20 +131,20 @@ impl DatabaseOptions {
     /// Workers perform garbage collection of removed records and old versions
     /// of record values when this number of bytes of garbage is accumulated.
     /// Defaults to 4 KiB.
-    pub const fn gc_threshold(mut self, bytes: usize) -> Self {
+    pub fn gc_threshold(&mut self, bytes: usize) -> &mut Self {
         self.gc_threshold = bytes;
         self
     }
 
     /// The size of a log buffer in bytes. Workers pass logs to log flushing
     /// threads in chunks of this size. Defaults to 1 MiB.
-    pub const fn log_buffer_size(mut self, bytes: usize) -> Self {
+    pub fn log_buffer_size(&mut self, bytes: usize) -> &mut Self {
         self.log_buffer_size_bytes = bytes;
         self
     }
 
     /// The number of log buffers per worker. Defaults to 8.
-    pub const fn log_buffers_per_worker(mut self, n: usize) -> Self {
+    pub fn log_buffers_per_worker(&mut self, n: usize) -> &mut Self {
         self.log_buffers_per_worker = n;
         self
     }

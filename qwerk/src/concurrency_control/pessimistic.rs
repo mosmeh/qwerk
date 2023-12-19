@@ -52,7 +52,7 @@ impl ConcurrencyControlInternal for Pessimistic {
                 let _guard = record.lock.write();
                 match record.tid.get().cmp(&tid) {
                     Ordering::Less => {
-                        let value = value.map(|value| value.into());
+                        let value = value.map(Into::into);
                         unsafe { record.set(value) };
                         record.tid.set(tid);
                     }
@@ -62,7 +62,7 @@ impl ConcurrencyControlInternal for Pessimistic {
             }
             Entry::Vacant(entry) => {
                 let record_ptr = Shared::new(Record {
-                    value: value.map(|value| value.into()).into(),
+                    value: value.map(Into::into).into(),
                     tid: tid.into(),
                     lock: Lock::new_unlocked(),
                 });
@@ -215,12 +215,12 @@ impl TransactionExecutor for Executor<'_> {
                         };
                         std::mem::forget(guard);
                     }
-                    let value = value.map(|value| value.into());
+                    let value = value.map(Into::into);
                     let original_value = unsafe { record.replace(value) };
                     item.kind = ItemKind::Write { original_value };
                 }
                 ItemKind::Write { .. } => {
-                    let value = value.map(|value| value.into());
+                    let value = value.map(Into::into);
                     unsafe { record.set(value) };
                 }
             }
@@ -235,7 +235,7 @@ impl TransactionExecutor for Executor<'_> {
                     return Err(Error::NotSerializable);
                 };
                 std::mem::forget(guard);
-                let value = value.map(|value| value.into());
+                let value = value.map(Into::into);
                 let original_value = unsafe { record.replace(value) };
                 RwItem {
                     key: key.into(),
@@ -245,7 +245,7 @@ impl TransactionExecutor for Executor<'_> {
                 }
             }
             Entry::Vacant(entry) => {
-                let value = value.map(|value| value.into());
+                let value = value.map(Into::into);
                 let record_ptr = Shared::new(Record {
                     value: value.into(),
                     tid: Tid::ZERO.into(),
@@ -360,6 +360,9 @@ impl Executor<'_> {
     }
 
     fn collect_garbage(&mut self) {
+        if self.garbage_records.is_empty() {
+            return;
+        }
         assert!(!self.qsbr_guard.is_online());
         self.global.qsbr.sync();
         for record_ptr in self.garbage_records.drain(..) {
@@ -375,9 +378,7 @@ impl Drop for Executor<'_> {
             self.process_removal_queue();
             backoff.snooze();
         }
-        if !self.garbage_records.is_empty() {
-            self.collect_garbage();
-        }
+        self.collect_garbage();
     }
 }
 

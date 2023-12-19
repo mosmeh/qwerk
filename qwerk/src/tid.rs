@@ -34,6 +34,7 @@ impl Tid {
         self.0 & FLAGS != 0
     }
 
+    #[must_use]
     const fn without_flags(self) -> Self {
         Self(self.0 & !FLAGS)
     }
@@ -44,6 +45,7 @@ impl Tid {
 
     /// Increments the sequence number.
     /// Returns `None` if the sequence number overflows.
+    #[must_use]
     fn increment_sequence(self) -> Option<Self> {
         let new = Self(self.0 + (1 << SEQUENCE_SHIFT));
         (new.epoch() == self.epoch()).then_some(new)

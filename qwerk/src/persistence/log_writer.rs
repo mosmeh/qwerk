@@ -248,7 +248,7 @@ impl PersistentEpoch {
         let mut min_epoch = None;
         for channel in channels.iter() {
             let epoch = channel.durable_epoch();
-            if min_epoch.map(|min_epoch| epoch < min_epoch).unwrap_or(true) {
+            if min_epoch.map_or(true, |min_epoch| epoch < min_epoch) {
                 min_epoch = Some(epoch);
             }
         }

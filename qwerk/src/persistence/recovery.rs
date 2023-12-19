@@ -37,7 +37,7 @@ pub fn recover<C: ConcurrencyControl>(
         .map(|_| {
             let shared = shared.clone();
             std::thread::spawn(move || {
-                run_recovery_worker::<C>(&shared, durable_epoch).unwrap();
+                run_log_replayer::<C>(&shared, durable_epoch).unwrap();
             })
         })
         .collect();
@@ -67,7 +67,7 @@ struct SharedState<T: 'static> {
     queue: SegQueue<PathBuf>,
 }
 
-fn run_recovery_worker<C: ConcurrencyControl>(
+fn run_log_replayer<C: ConcurrencyControl>(
     shared: &SharedState<C::Record>,
     durable_epoch: Epoch,
 ) -> std::io::Result<()> {
