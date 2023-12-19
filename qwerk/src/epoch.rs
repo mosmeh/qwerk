@@ -31,10 +31,12 @@ const OFFLINE_EPOCH: u32 = u32::MAX;
 pub struct Epoch(pub u32);
 
 impl Epoch {
+    #[must_use]
     pub(crate) const fn increment(self) -> Self {
         Self(self.0 + 1)
     }
 
+    #[must_use]
     pub(crate) const fn decrement(self) -> Self {
         Self(self.0 - 1)
     }

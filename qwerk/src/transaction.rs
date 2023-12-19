@@ -136,6 +136,6 @@ impl<C: ConcurrencyControl> Drop for Transaction<'_, '_, C> {
     ///
     /// [`abort`]: #method.abort
     fn drop(&mut self) {
-        self.do_abort()
+        self.do_abort();
     }
 }
