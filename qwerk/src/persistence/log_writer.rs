@@ -12,6 +12,7 @@ use std::{
     cell::OnceCell,
     fs::{DirBuilder, File},
     io::{IoSlice, Read, Write},
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU32, Ordering::SeqCst},
@@ -24,9 +25,9 @@ pub struct Config {
     pub dir: PathBuf,
     pub epoch_fw: Arc<EpochFramework>,
     pub persistent_epoch: Arc<PersistentEpoch>,
-    pub flushing_threads: usize,
+    pub flushing_threads: NonZeroUsize,
     pub preallocated_buffer_size: usize,
-    pub buffers_per_writer: usize,
+    pub buffers_per_writer: NonZeroUsize,
 }
 
 /// A redo logger.
@@ -50,7 +51,7 @@ impl Logger {
         // references to LogChannel.
         let (flush_req_tx, flush_req_rx) = crossbeam_channel::unbounded::<FlushRequest>();
 
-        let flushers = (0..config.flushing_threads)
+        let flushers = (0..config.flushing_threads.get())
             .map(|_| {
                 let channels = channels.clone();
                 let flush_req_rx = flush_req_rx.clone();
@@ -466,14 +467,15 @@ impl LogChannel {
             .join(format!("{}{}", super::LOG_FILE_NAME_PREFIX, index));
         let file = File::create(path)?;
 
-        let flush_queue = ArrayQueue::new(config.buffers_per_writer);
+        let flush_queue = ArrayQueue::new(config.buffers_per_writer.get());
 
         // The first log buffer that will be queued to the channel will have
         // an epoch >= global_epoch.
         let durable_epoch = config.epoch_fw.global_epoch().decrement();
 
-        let (free_bufs_tx, free_bufs_rx) = crossbeam_channel::bounded(config.buffers_per_writer);
-        for _ in 0..config.buffers_per_writer {
+        let (free_bufs_tx, free_bufs_rx) =
+            crossbeam_channel::bounded(config.buffers_per_writer.get());
+        for _ in 0..config.buffers_per_writer.get() {
             free_bufs_tx
                 .try_send(Vec::with_capacity(config.preallocated_buffer_size))
                 .unwrap();
@@ -515,9 +517,9 @@ impl LogChannel {
             return Ok(());
         }
 
-        assert!(self.flush_queue.len() <= self.config.buffers_per_writer);
+        assert!(self.flush_queue.len() <= self.config.buffers_per_writer.get());
 
-        let mut bufs_to_flush = Vec::with_capacity(self.config.buffers_per_writer);
+        let mut bufs_to_flush = Vec::with_capacity(self.config.buffers_per_writer.get());
         let min_epoch = OnceCell::new();
         while let Some(buf) = self.flush_queue.pop() {
             // Epoch is non-decreasing, so the first buffer has
@@ -537,7 +539,7 @@ impl LogChannel {
         let next_durable_epoch = min_epoch.get().unwrap().decrement();
 
         assert!(!bufs_to_flush.is_empty());
-        assert!(bufs_to_flush.len() <= self.config.buffers_per_writer);
+        assert!(bufs_to_flush.len() <= self.config.buffers_per_writer.get());
 
         let mut start_buf_index = 0;
         let mut start_byte_offset = 0;

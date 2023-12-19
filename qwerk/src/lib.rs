@@ -21,7 +21,7 @@ use persistence::{LogWriter, Logger, LoggerConfig, PersistentEpoch};
 use scc::HashIndex;
 use shared::Shared;
 use small_bytes::SmallBytes;
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{num::NonZeroUsize, path::Path, sync::Arc, time::Duration};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -48,24 +48,24 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct DatabaseOptions {
-    background_threads: usize,
+    background_threads: NonZeroUsize,
     epoch_duration: Duration,
     gc_threshold: usize,
     log_buffer_size_bytes: usize,
-    log_buffers_per_worker: usize,
+    log_buffers_per_worker: NonZeroUsize,
 }
 
 impl Default for DatabaseOptions {
     fn default() -> Self {
         Self {
-            background_threads: match std::thread::available_parallelism() {
-                Ok(n) => n.get().min(4),
-                Err(_) => 1,
-            },
+            background_threads: std::thread::available_parallelism()
+                .map_or(1, |n| n.get().min(4))
+                .try_into()
+                .unwrap(),
             epoch_duration: Duration::from_millis(40), // Default in the Silo paper (Tu et al. 2013).
             gc_threshold: 4096,
             log_buffer_size_bytes: 1024 * 1024,
-            log_buffers_per_worker: 8,
+            log_buffers_per_worker: 8.try_into().unwrap(),
         }
     }
 }
@@ -117,7 +117,7 @@ impl DatabaseOptions {
 
     /// The number of background threads used for logging and recovery.
     /// Defaults to the smaller of the number of CPU cores and 4.
-    pub fn background_threads(&mut self, n: usize) -> &mut Self {
+    pub fn background_threads(&mut self, n: NonZeroUsize) -> &mut Self {
         self.background_threads = n;
         self
     }
@@ -144,7 +144,7 @@ impl DatabaseOptions {
     }
 
     /// The number of log buffers per worker. Defaults to 8.
-    pub fn log_buffers_per_worker(&mut self, n: usize) -> &mut Self {
+    pub fn log_buffers_per_worker(&mut self, n: NonZeroUsize) -> &mut Self {
         self.log_buffers_per_worker = n;
         self
     }
