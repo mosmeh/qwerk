@@ -97,6 +97,7 @@ impl Logger {
 
     pub fn spawn_writer(&self) -> LogWriter {
         LogWriter {
+            logger: self,
             channel: self
                 .channels
                 .alloc_with(|index| LogChannel::new(index, self.config.clone()).unwrap()),
@@ -306,12 +307,13 @@ struct FlushRequest {
 //                        +---- free_bufs <----+   durable_epoch
 
 pub struct LogWriter<'a> {
+    logger: &'a Logger,
     channel: Slot<'a, LogChannel>,
     flush_req_tx: crossbeam_channel::Sender<FlushRequest>,
 }
 
 impl LogWriter<'_> {
-    pub fn reserver(&mut self) -> CapacityReserver {
+    pub fn reserver(&self) -> CapacityReserver {
         CapacityReserver {
             writer: self,
             num_bytes: std::mem::size_of::<u64>() * 2, // tid and num_records
@@ -330,6 +332,7 @@ pub struct CapacityReserver<'a> {
 }
 
 impl<'a> CapacityReserver<'a> {
+    /// Reserves capacity for a key-value pair.
     pub fn reserve_write(&mut self, key: &[u8], value: Option<&[u8]>) {
         self.num_bytes += key.len() + std::mem::size_of::<u64>() * 2; // key, key.len(), and value.len()
         if let Some(value) = value {
@@ -378,47 +381,77 @@ pub struct ReservedCapacity<'a> {
 }
 
 impl<'a> ReservedCapacity<'a> {
-    pub fn insert(mut self, tid: Tid) -> Entry<'a> {
+    /// Inserts a new log entry into the reserved capacity.
+    pub fn insert(mut self, tid: Tid) -> LogEntry<'a> {
         let buf = self.buf.as_mut().unwrap();
-        buf.bytes.write_u64(tid.0);
-
-        let num_records_offset = buf.bytes.len();
-        buf.bytes.write_u64(u64::MAX); // placeholder
 
         let epoch = tid.epoch();
         let min_epoch = *buf.min_epoch.get_or_init(|| epoch);
         assert!(min_epoch <= epoch);
 
-        Entry {
+        buf.bytes.write_u64(tid.0);
+
+        let num_records_offset = buf.bytes.len();
+        buf.bytes.write_u64(u64::MAX); // placeholder
+
+        LogEntry {
             writer: self.writer,
             buf: self.buf,
+            epoch,
             num_records_offset,
             num_records: 0,
         }
     }
 }
 
-pub struct Entry<'a> {
+pub struct LogEntry<'a> {
     writer: &'a LogWriter<'a>,
     buf: MappedMutexGuard<'a, Option<LogBuf>>,
+    epoch: Epoch,
     num_records_offset: usize,
-    num_records: usize,
+    num_records: u64,
 }
 
-impl Entry<'_> {
+impl LogEntry<'_> {
+    /// Writes a key-value pair to the log.
     pub fn write(&mut self, key: &[u8], value: Option<&[u8]>) {
         let bytes = &mut self.buf.as_mut().unwrap().bytes;
         bytes.write_bytes(key);
         bytes.write_maybe_bytes(value);
         self.num_records += 1;
     }
+
+    pub fn epoch(&self) -> Epoch {
+        self.epoch
+    }
+
+    /// Finishes writing the log entry, and persists it to the disk.
+    ///
+    /// Returns the global durable epoch after the flush.
+    pub fn flush(mut self) -> std::io::Result<Epoch> {
+        let mut buf = self.buf.take().unwrap();
+        buf.bytes.set_u64(self.num_records_offset, self.num_records);
+
+        let channel = &*self.writer.channel;
+        channel.queue(buf);
+
+        let mut flush_state = channel.flush_state.lock();
+        channel.flush(&mut flush_state)?;
+        assert!(channel.flush_queue.is_empty());
+
+        let logger = self.writer.logger;
+        logger.config.persistent_epoch.update(&logger.channels)
+    }
 }
 
-impl Drop for Entry<'_> {
+impl Drop for LogEntry<'_> {
+    /// Queues the flush of the log entry if the buffer is full.
     fn drop(&mut self) {
-        let mut bytes = self.buf.as_mut().unwrap().bytes.as_mut_slice();
-        bytes.set_u64(self.num_records_offset, self.num_records as u64);
-        if bytes.len() >= self.writer.channel.config.preallocated_buffer_size {
+        let Some(buf) = self.buf.as_mut() else {
+            return;
+        };
+        buf.bytes.set_u64(self.num_records_offset, self.num_records);
+        if buf.bytes.len() >= self.writer.channel.config.preallocated_buffer_size {
             self.writer
                 .queue_and_request_flush(self.buf.take().unwrap());
         }

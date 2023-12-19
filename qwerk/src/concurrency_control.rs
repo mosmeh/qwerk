@@ -5,8 +5,8 @@ pub use optimistic::Optimistic;
 pub use pessimistic::Pessimistic;
 
 use crate::{
-    epoch::{Epoch, EpochGuard},
-    persistence::LogWriter,
+    epoch::EpochGuard,
+    persistence::{LogEntry, LogWriter},
     record::Record,
     small_bytes::SmallBytes,
     tid::Tid,
@@ -70,8 +70,10 @@ pub trait TransactionExecutor {
     ///
     /// Implementations should write modified records to `log_writer`
     /// if the commit succeeds.
-    /// Returns the commit epoch on success.
-    fn precommit(&mut self, log_writer: &mut LogWriter) -> Result<Epoch>;
+    ///
+    /// On success, returns a log entry that contains the modifications
+    /// made in the transaction.
+    fn precommit<'a>(&mut self, log_writer: &'a LogWriter<'a>) -> Result<LogEntry<'a>>;
 
     /// Aborts the transaction.
     ///

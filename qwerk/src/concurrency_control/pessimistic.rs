@@ -1,8 +1,8 @@
 use super::{ConcurrencyControl, ConcurrencyControlInternal, TransactionExecutor};
 use crate::{
-    epoch::{Epoch, EpochGuard},
+    epoch::EpochGuard,
     lock::Lock,
-    persistence::LogWriter,
+    persistence::{LogEntry, LogWriter},
     qsbr::{Qsbr, QsbrGuard},
     record,
     small_bytes::SmallBytes,
@@ -266,7 +266,7 @@ impl TransactionExecutor for Executor<'_> {
         Ok(())
     }
 
-    fn precommit(&mut self, log_writer: &mut LogWriter) -> Result<Epoch> {
+    fn precommit<'a>(&mut self, log_writer: &'a LogWriter<'a>) -> Result<LogEntry<'a>> {
         let mut tid_set = self.tid_generator.begin_transaction();
         let mut log_capacity_reserver = log_writer.reserver();
         for item in &self.rw_set {
@@ -312,7 +312,7 @@ impl TransactionExecutor for Executor<'_> {
                 }
             }
         }
-        Ok(commit_epoch)
+        Ok(log_entry)
     }
 
     fn abort(&mut self) {

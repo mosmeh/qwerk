@@ -1,5 +1,6 @@
 use crate::{
-    concurrency_control::TransactionExecutor, ConcurrencyControl, Epoch, Error, Result, Worker,
+    concurrency_control::TransactionExecutor, persistence::LogEntry, ConcurrencyControl, Epoch,
+    Error, Result, Worker,
 };
 
 pub struct Transaction<'db, 'worker, C: ConcurrencyControl> {
@@ -52,16 +53,30 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        self.try_mutate(|worker| {
-            worker
-                .txn_executor
-                .write(key.as_ref(), Some(value.as_ref()))
-        })
+        self.do_write(key, Some(value))
     }
 
     /// Removes a key from the database.
     pub fn remove<K: AsRef<[u8]>>(&mut self, key: K) -> Result<()> {
-        self.try_mutate(|worker| worker.txn_executor.write(key.as_ref(), None))
+        self.do_write::<_, &[u8]>(key, None)
+    }
+
+    fn do_write<K, V>(&mut self, key: K, value: Option<V>) -> Result<()>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        if !self.is_active {
+            return Err(Error::AlreadyAborted);
+        }
+        let result = self
+            .worker
+            .txn_executor
+            .write(key.as_ref(), value.as_ref().map(AsRef::as_ref));
+        if result.is_err() {
+            self.do_abort();
+        }
+        result
     }
 
     /// Commits the transaction and waits until the commit is durable.
@@ -75,9 +90,11 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
     /// An epoch at which the transaction was committed.
     ///
     /// [`get`]: #method.get
-    pub fn commit(self) -> Result<Epoch> {
+    pub fn commit(mut self) -> Result<Epoch> {
         let persistent_epoch = self.worker.persistent_epoch;
-        let commit_epoch = self.precommit()?;
+        let log_entry = self.do_precommit()?;
+        let commit_epoch = log_entry.epoch();
+        log_entry.flush()?; // Even if this fails, we can no longer abort the transaction.
         persistent_epoch.wait_for(commit_epoch);
         Ok(commit_epoch)
     }
@@ -93,11 +110,20 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
     /// [`Database::durable_epoch`]: crate::Database#method.durable_epoch
     /// [`commit`]: #method.commit
     pub fn precommit(mut self) -> Result<Epoch> {
-        let epoch =
-            self.try_mutate(|worker| worker.txn_executor.precommit(&mut worker.log_writer))?;
+        Ok(self.do_precommit()?.epoch())
+    }
+
+    fn do_precommit(&mut self) -> Result<LogEntry> {
+        if !self.is_active {
+            return Err(Error::AlreadyAborted);
+        }
+        let log_entry = self
+            .worker
+            .txn_executor
+            .precommit(&self.worker.log_writer)?; // `do_abort` is called in `drop` on `Err`
         self.worker.txn_executor.end_transaction();
         self.is_active = false;
-        Ok(epoch)
+        Ok(log_entry)
     }
 
     /// Aborts the transaction.
@@ -105,20 +131,6 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
     /// All the changes made in the transaction are rolled back.
     pub fn abort(mut self) {
         self.do_abort();
-    }
-
-    fn try_mutate<T, F>(&mut self, f: F) -> Result<T>
-    where
-        F: FnOnce(&mut Worker<C>) -> Result<T>,
-    {
-        if !self.is_active {
-            return Err(Error::AlreadyAborted);
-        }
-        let result = f(self.worker);
-        if result.is_err() {
-            self.do_abort();
-        }
-        result
     }
 
     fn do_abort(&mut self) {

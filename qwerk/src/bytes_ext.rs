@@ -49,9 +49,9 @@ pub trait BytesExt {
     fn set_u64(&mut self, offset: usize, n: u64);
 }
 
-impl BytesExt for &mut [u8] {
+impl<T: AsMut<[u8]>> BytesExt for T {
     fn set_u64(&mut self, offset: usize, n: u64) {
-        self[offset..][..std::mem::size_of::<u64>()].copy_from_slice(&n.to_le_bytes());
+        self.as_mut()[offset..][..std::mem::size_of::<u64>()].copy_from_slice(&n.to_le_bytes());
     }
 }
 

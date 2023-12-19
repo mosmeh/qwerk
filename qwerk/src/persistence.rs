@@ -2,7 +2,7 @@ mod log_reader;
 mod log_writer;
 mod recovery;
 
-pub use log_writer::{Config as LoggerConfig, LogWriter, Logger, PersistentEpoch};
+pub use log_writer::{Config as LoggerConfig, LogEntry, LogWriter, Logger, PersistentEpoch};
 pub use recovery::recover;
 
 use std::path::Path;
