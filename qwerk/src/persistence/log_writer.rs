@@ -108,7 +108,7 @@ impl Logger {
     ///
     /// Returns the durable epoch after the flush.
     pub fn flush(&self) -> std::io::Result<Epoch> {
-        let reclamation_epoch = self.config.epoch_fw.sync();
+        self.config.epoch_fw.sync();
         for channel in self.channels.iter() {
             let mut write_state = channel.write_state.lock();
             if let Some(buf) = write_state.take_queueable_buf() {
@@ -120,9 +120,11 @@ impl Logger {
             assert!(channel.flush_queue.is_empty());
 
             // The next log buffer that will be queued to the channel will
-            // have an epoch > reclamation_epoch. Thus, we are sure that
-            // durable_epoch >= reclamation_epoch.
-            channel.durable_epoch.fetch_max(reclamation_epoch.0, SeqCst);
+            // have an epoch >= global_epoch.
+            let global_epoch = self.config.epoch_fw.global_epoch();
+            channel
+                .durable_epoch
+                .fetch_max(global_epoch.decrement().0, SeqCst);
         }
         self.config.persistent_epoch.update(&self.channels)
     }
@@ -176,12 +178,12 @@ fn run_daemon(
                 continue;
             };
             if channel.flush_queue.is_empty() {
-                // The next log buffer that will be queued to the channel
-                // will have an epoch > reclamation_epoch.
-                // Thus, we are sure that durable_epoch is >= reclamation_epoch.
+                // The next log buffer that will be queued to the channel will
+                // have an epoch >= global_epoch.
+                let global_epoch = config.epoch_fw.global_epoch();
                 channel
                     .durable_epoch
-                    .fetch_max(config.epoch_fw.reclamation_epoch().0, SeqCst);
+                    .fetch_max(global_epoch.decrement().0, SeqCst);
             }
         }
 
