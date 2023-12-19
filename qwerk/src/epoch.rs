@@ -101,14 +101,6 @@ impl EpochFramework {
         Epoch(self.shared.global_epoch.load(SeqCst))
     }
 
-    /// Returns the reclamation epoch.
-    ///
-    /// The reclamation epoch is the largest epoch that no participant of the
-    /// epoch framework is currently in.
-    pub fn reclamation_epoch(&self) -> Epoch {
-        Epoch(self.shared.global_epoch.load(SeqCst) - RECLAMATION_EPOCH_OFFSET)
-    }
-
     pub fn acquire(&self) -> EpochGuard {
         EpochGuard {
             global_epoch: &self.shared.global_epoch,
@@ -119,18 +111,16 @@ impl EpochFramework {
         }
     }
 
-    /// Waits until the current global epoch becomes reclaimable.
+    /// Waits until the global epoch is incremented.
     ///
-    /// Returns the new reclamation epoch, which is the global epoch when
-    /// this method is called.
+    /// Returns the new global epoch.
     pub fn sync(&self) -> Epoch {
-        let new_reclamation_epoch = self.shared.global_epoch.load(SeqCst);
-        let new_global_epoch = new_reclamation_epoch + RECLAMATION_EPOCH_OFFSET;
+        let new_global_epoch = self.shared.global_epoch.load(SeqCst) + 1;
         let backoff = Backoff::new();
         while self.shared.global_epoch.load(SeqCst) < new_global_epoch {
             backoff.snooze();
         }
-        Epoch(new_reclamation_epoch)
+        Epoch(new_global_epoch)
     }
 }
 
