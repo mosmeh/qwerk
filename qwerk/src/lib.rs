@@ -37,8 +37,8 @@ pub enum Error {
     #[error("attempted to perform an operation on the aborted transaction")]
     AlreadyAborted,
 
-    /// Database is corrupted or tried to open a non-database directory.
-    #[error("database is corrupted or tried to open a non-database directory")]
+    /// Database is corrupted or tried to open a non-database path.
+    #[error("database is corrupted or tried to open a non-database path")]
     Corrupted,
 
     #[error(transparent)]
@@ -82,13 +82,20 @@ impl DatabaseOptions {
         P: AsRef<Path>,
     {
         let dir = path.as_ref();
-        if dir.exists() && !dir.is_dir() {
-            return Err(Error::Corrupted);
+        match std::fs::create_dir(dir) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !dir.is_dir() {
+                    return Err(Error::Corrupted);
+                }
+            }
+            Err(e) => return Err(e.into()),
         }
+        let dir = dir.canonicalize()?;
 
-        let persistent_epoch = PersistentEpoch::new(dir)?;
+        let persistent_epoch = PersistentEpoch::new(&dir)?;
         let durable_epoch = persistent_epoch.get();
-        let index = persistence::recover::<C>(dir, durable_epoch, self.background_threads)?;
+        let index = persistence::recover::<C>(&dir, durable_epoch, self.background_threads)?;
 
         let epoch_fw = Arc::new(EpochFramework::new(epoch::Config {
             initial_epoch: durable_epoch.increment(),
@@ -97,7 +104,7 @@ impl DatabaseOptions {
 
         let persistent_epoch = Arc::new(persistent_epoch);
         let logger = Logger::new(LoggerConfig {
-            dir: dir.to_path_buf(),
+            dir,
             epoch_fw: epoch_fw.clone(),
             persistent_epoch: persistent_epoch.clone(),
             flushing_threads: self.background_threads,
