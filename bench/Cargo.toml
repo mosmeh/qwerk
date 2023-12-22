@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.75"
+anyhow = "1.0.76"
 clap = { version = "4.4.11", features = ["derive"] }
 core_affinity = { version = "0.8.1", optional = true }
 qwerk = { path = "../qwerk" }

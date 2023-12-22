@@ -1,6 +1,7 @@
 mod bytes_ext;
 mod concurrency_control;
 mod epoch;
+mod file_lock;
 mod lock;
 mod persistence;
 mod qsbr;
@@ -17,6 +18,7 @@ pub use transaction::Transaction;
 
 use concurrency_control::TransactionExecutor;
 use epoch::EpochFramework;
+use file_lock::FileLock;
 use persistence::{LogWriter, Logger, LoggerConfig, PersistentEpoch};
 use scc::HashIndex;
 use shared::Shared;
@@ -25,6 +27,14 @@ use std::{num::NonZeroUsize, path::Path, sync::Arc, time::Duration};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Database is already open.
+    #[error("database is already open")]
+    AlreadyOpen,
+
+    /// Database is corrupted or tried to open a non-database path.
+    #[error("database is corrupted or tried to open a non-database path")]
+    Corrupted,
+
     /// Serialization of a transaction failed.
     #[error("serilization of the transaction failed")]
     NotSerializable,
@@ -36,10 +46,6 @@ pub enum Error {
     /// Attempted to perform an operation on an aborted transaction.
     #[error("attempted to perform an operation on the aborted transaction")]
     AlreadyAborted,
-
-    /// Database is corrupted or tried to open a non-database path.
-    #[error("database is corrupted or tried to open a non-database path")]
-    Corrupted,
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -92,6 +98,8 @@ impl DatabaseOptions {
             Err(e) => return Err(e.into()),
         }
         let dir = dir.canonicalize()?;
+        let file_lock =
+            FileLock::try_lock_exclusive(dir.join("lock"))?.ok_or(Error::AlreadyOpen)?;
 
         let persistent_epoch = PersistentEpoch::new(&dir)?;
         let durable_epoch = persistent_epoch.get();
@@ -119,6 +127,7 @@ impl DatabaseOptions {
             epoch_fw,
             logger,
             persistent_epoch,
+            _file_lock: file_lock,
         })
     }
 
@@ -171,6 +180,7 @@ pub struct Database<C: ConcurrencyControl> {
     epoch_fw: Arc<EpochFramework>,
     logger: Logger,
     persistent_epoch: Arc<PersistentEpoch>,
+    _file_lock: FileLock,
 }
 
 impl<C: ConcurrencyControl> Database<C> {

@@ -12,8 +12,18 @@ scc = "2.0.6"
 static_assertions = "1.1.0"
 thiserror = "1.0.51"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.151"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52.0", features = [
+	"Win32_Foundation",
+	"Win32_Storage_FileSystem",
+	"Win32_System_IO",
+] }
+
 [dev-dependencies]
-anyhow = "1.0.75"
+anyhow = "1.0.76"
 clap = { version = "4.4.11", features = ["derive"] }
 
 [lints.clippy]
