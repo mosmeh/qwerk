@@ -249,7 +249,7 @@ impl TransactionExecutor for Executor<'_> {
                 let Some(RecordSnapshot { value, tid }) = unsafe { record_ptr.as_ref() }.read()
                 else {
                     // The record was removed by another transaction.
-                    return Err(Error::NotSerializable);
+                    return Err(Error::TransactionNotSerializable);
                 };
                 ReadItem {
                     key,
@@ -327,7 +327,7 @@ impl TransactionExecutor for Executor<'_> {
             if !was_vacant {
                 let Some(tid) = unsafe { record_ptr.as_ref() }.lock_if_present() else {
                     // The record was removed by another transaction.
-                    return Err(Error::NotSerializable);
+                    return Err(Error::TransactionNotSerializable);
                 };
                 tid_set.add(tid);
             }
@@ -356,7 +356,7 @@ impl TransactionExecutor for Executor<'_> {
                     // This item is not in the write set.
                     if self.index.contains(&item.key) {
                         // The record was inserted by another transaction.
-                        return Err(Error::NotSerializable);
+                        return Err(Error::TransactionNotSerializable);
                     }
                     continue;
                 }
@@ -366,7 +366,7 @@ impl TransactionExecutor for Executor<'_> {
             if tid != item.tid {
                 // The TID doesn't match or the record is locked by
                 // another transaction.
-                return Err(Error::NotSerializable);
+                return Err(Error::TransactionNotSerializable);
             }
             assert!(!tid.is_absent());
 

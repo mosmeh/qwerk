@@ -210,7 +210,9 @@ impl PersistentEpoch {
 
         let path = dir.join("durable_epoch");
         let epoch = match File::open(&path) {
-            Ok(file) if file.metadata()?.len() != FILE_SIZE as u64 => return Err(Error::Corrupted),
+            Ok(file) if file.metadata()?.len() != FILE_SIZE as u64 => {
+                return Err(Error::DatabaseCorrupted)
+            }
             Ok(mut file) => {
                 let mut bytes = [0; FILE_SIZE];
                 file.read_exact(&mut bytes)?;

@@ -168,7 +168,7 @@ impl TransactionExecutor for Executor<'_> {
                 let record_ptr = *entry.get();
                 let record = unsafe { record_ptr.as_ref() };
                 let Some(guard) = record.lock.try_read() else {
-                    return Err(Error::NotSerializable);
+                    return Err(Error::TransactionNotSerializable);
                 };
                 std::mem::forget(guard);
                 let item = RwItem {
@@ -211,7 +211,7 @@ impl TransactionExecutor for Executor<'_> {
                         assert!(record.lock.is_locked_exclusive());
                     } else {
                         let Some(guard) = record.lock.try_upgrade() else {
-                            return Err(Error::NotSerializable);
+                            return Err(Error::TransactionNotSerializable);
                         };
                         std::mem::forget(guard);
                     }
@@ -232,7 +232,7 @@ impl TransactionExecutor for Executor<'_> {
                 let record_ptr = *entry.get();
                 let record = unsafe { record_ptr.as_ref() };
                 let Some(guard) = record.lock.try_write() else {
-                    return Err(Error::NotSerializable);
+                    return Err(Error::TransactionNotSerializable);
                 };
                 std::mem::forget(guard);
                 let value = value.map(Into::into);
