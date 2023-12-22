@@ -29,15 +29,15 @@ use std::{num::NonZeroUsize, path::Path, sync::Arc, time::Duration};
 pub enum Error {
     /// Database is already open.
     #[error("database is already open")]
-    AlreadyOpen,
+    DatabaseAlreadyOpen,
 
     /// Database is corrupted or tried to open a non-database path.
     #[error("database is corrupted or tried to open a non-database path")]
-    Corrupted,
+    DatabaseCorrupted,
 
     /// Serialization of a transaction failed.
     #[error("serilization of the transaction failed")]
-    NotSerializable,
+    TransactionNotSerializable,
 
     /// Too many transactions in a single epoch.
     #[error("too many transactions in a single epoch")]
@@ -45,7 +45,7 @@ pub enum Error {
 
     /// Attempted to perform an operation on an aborted transaction.
     #[error("attempted to perform an operation on the aborted transaction")]
-    AlreadyAborted,
+    TransactionAlreadyAborted,
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -92,14 +92,14 @@ impl DatabaseOptions {
             Ok(()) => (),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 if !dir.is_dir() {
-                    return Err(Error::Corrupted);
+                    return Err(Error::DatabaseCorrupted);
                 }
             }
             Err(e) => return Err(e.into()),
         }
         let dir = dir.canonicalize()?;
         let file_lock =
-            FileLock::try_lock_exclusive(dir.join("lock"))?.ok_or(Error::AlreadyOpen)?;
+            FileLock::try_lock_exclusive(dir.join("lock"))?.ok_or(Error::DatabaseAlreadyOpen)?;
 
         let persistent_epoch = PersistentEpoch::new(&dir)?;
         let durable_epoch = persistent_epoch.get();

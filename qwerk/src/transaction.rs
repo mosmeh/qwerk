@@ -21,7 +21,7 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
     /// Returns `None` if the key does not exist.
     pub fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<&[u8]>> {
         if !self.is_active {
-            return Err(Error::AlreadyAborted);
+            return Err(Error::TransactionAlreadyAborted);
         }
 
         let result = self.worker.txn_executor.read(key.as_ref());
@@ -67,7 +67,7 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
         V: AsRef<[u8]>,
     {
         if !self.is_active {
-            return Err(Error::AlreadyAborted);
+            return Err(Error::TransactionAlreadyAborted);
         }
         let result = self
             .worker
@@ -115,7 +115,7 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
 
     fn do_precommit(&mut self) -> Result<LogEntry> {
         if !self.is_active {
-            return Err(Error::AlreadyAborted);
+            return Err(Error::TransactionAlreadyAborted);
         }
         let log_entry = self
             .worker
