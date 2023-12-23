@@ -22,7 +22,7 @@ use std::{
 // Thus global_epoch - 2 is the reclamation epoch.
 const RECLAMATION_EPOCH_OFFSET: u32 = 2;
 
-const OFFLINE_EPOCH: u32 = u32::MAX;
+const RELEASED_MARKER: u32 = u32::MAX;
 
 /// A unit of time for concurrency control and durability.
 ///
@@ -49,11 +49,6 @@ impl Epoch {
     }
 }
 
-pub struct Config {
-    pub initial_epoch: Epoch,
-    pub epoch_duration: Duration,
-}
-
 pub struct EpochFramework {
     epoch_duration: Duration,
     shared: Arc<SharedState>,
@@ -62,11 +57,9 @@ pub struct EpochFramework {
 }
 
 impl EpochFramework {
-    pub fn new(config: Config) -> Self {
+    pub fn new(initial_epoch: Epoch, epoch_duration: Duration) -> Self {
         // Ensure that reclamation_epoch > 0
-        let initial_epoch = config
-            .initial_epoch
-            .max(Epoch(RECLAMATION_EPOCH_OFFSET + 1));
+        let initial_epoch = initial_epoch.max(Epoch(RECLAMATION_EPOCH_OFFSET + 1));
 
         let shared = Arc::new(SharedState {
             global_epoch: initial_epoch.0.into(),
@@ -79,7 +72,7 @@ impl EpochFramework {
                 .name("epoch_bumper".into())
                 .spawn(move || {
                     let mut global_epoch = initial_epoch.0;
-                    while !stop_rx.recv_timeout(config.epoch_duration) {
+                    while !stop_rx.recv_timeout(epoch_duration) {
                         for local_epoch in shared.local_epochs.iter() {
                             let backoff = Backoff::new();
                             while local_epoch.load(SeqCst) < global_epoch {
@@ -93,7 +86,7 @@ impl EpochFramework {
         };
 
         Self {
-            epoch_duration: config.epoch_duration,
+            epoch_duration,
             shared,
             epoch_bumper: Some(epoch_bumper),
             stop_tx,
@@ -108,13 +101,13 @@ impl EpochFramework {
         Epoch(self.shared.global_epoch.load(SeqCst))
     }
 
-    pub fn acquire(&self) -> EpochGuard {
-        EpochGuard {
+    pub fn participant(&self) -> EpochParticipant {
+        EpochParticipant {
             global_epoch: &self.shared.global_epoch,
             local_epoch: self
                 .shared
                 .local_epochs
-                .alloc_with(|_| AtomicU32::new(OFFLINE_EPOCH).into()),
+                .alloc_with(|_| AtomicU32::new(RELEASED_MARKER).into()),
         }
     }
 
@@ -143,30 +136,53 @@ struct SharedState {
     local_epochs: SlottedCell<CachePadded<AtomicU32>>,
 }
 
-pub struct EpochGuard<'a> {
+pub struct EpochParticipant<'a> {
     global_epoch: &'a AtomicU32,
     local_epoch: Slot<'a, CachePadded<AtomicU32>>,
 }
 
-impl EpochGuard<'_> {
-    /// Takes a snapshot of the current global epoch.
-    ///
-    /// Returns the current global epoch.
-    pub fn refresh(&self) -> Epoch {
-        let epoch = self.global_epoch.load(SeqCst);
-        self.local_epoch.store(epoch, SeqCst);
-        Epoch(epoch)
+impl<'a> EpochParticipant<'a> {
+    #[must_use]
+    pub fn acquire(&mut self) -> EpochProtector<'a, '_> {
+        let (_, newly_acquired) = self.refresh();
+        assert!(newly_acquired, "epoch protection is already acquired");
+        EpochProtector { participant: self }
     }
 
-    /// Temporarily marks the owner of this guard as not participating in the
-    /// epoch framework.
+    /// Forcibly removes the epoch protection.
     ///
-    /// Until the next call to [`refresh`], the owner of this guard is not
-    /// considered as a participant of the epoch framework.
+    /// # Panics
     ///
-    /// [`refresh`]: #method.refresh
-    pub fn release(&self) {
-        self.local_epoch.store(OFFLINE_EPOCH, SeqCst);
+    /// Panics if the epoch protection is already released.
+    pub fn force_release(&self) {
+        let prev = self.local_epoch.swap(RELEASED_MARKER, SeqCst);
+        assert_ne!(
+            prev, RELEASED_MARKER,
+            "epoch protection is already released"
+        );
+    }
+
+    /// Forcibly moves the local epoch forward to the current global epoch.
+    ///
+    /// Returns the current global epoch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the epoch protection is not acquired.
+    pub fn force_refresh(&self) -> Epoch {
+        let (epoch, newly_acquired) = self.refresh();
+        assert!(!newly_acquired, "epoch protection is not acquired");
+        epoch
+    }
+
+    /// Moves the local epoch forward to the current global epoch.
+    ///
+    /// Returns the current global epoch and whether this participant
+    /// newly acquired the epoch protection due to this call.
+    fn refresh(&self) -> (Epoch, bool) {
+        let epoch = self.global_epoch.load(SeqCst);
+        let prev = self.local_epoch.swap(epoch, SeqCst);
+        (Epoch(epoch), prev == RELEASED_MARKER)
     }
 
     /// Returns the reclamation epoch.
@@ -178,8 +194,91 @@ impl EpochGuard<'_> {
     }
 }
 
-impl Drop for EpochGuard<'_> {
+pub struct EpochProtector<'fw, 'participant> {
+    participant: &'participant mut EpochParticipant<'fw>,
+}
+
+impl Drop for EpochProtector<'_, '_> {
     fn drop(&mut self) {
-        self.release();
+        self.participant.force_release();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Epoch, EpochFramework, EpochParticipant};
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering::SeqCst},
+            Arc, Barrier,
+        },
+        time::Duration,
+    };
+
+    fn new_epoch_fw() -> EpochFramework {
+        EpochFramework::new(Epoch(0), Duration::from_millis(1))
+    }
+
+    #[test]
+    fn sync() {
+        let epoch_fw = new_epoch_fw();
+        let epoch1 = epoch_fw.sync();
+        let epoch2 = epoch_fw.sync();
+        assert!(epoch1 < epoch2);
+    }
+
+    #[test]
+    fn epoch_protector() {
+        let epoch_fw = Arc::new(new_epoch_fw());
+
+        let synced = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(Barrier::new(2));
+        let thread = {
+            let epoch_fw = epoch_fw.clone();
+            let synced = synced.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let mut participant = epoch_fw.participant();
+                std::mem::forget(participant.acquire());
+                barrier.wait();
+                while !synced.load(SeqCst) {
+                    participant.force_refresh();
+                }
+                participant.force_release();
+            })
+        };
+
+        barrier.wait();
+        epoch_fw.sync();
+        epoch_fw.sync();
+        synced.store(true, SeqCst);
+        thread.join().unwrap();
+        epoch_fw.sync();
+        epoch_fw.sync();
+    }
+
+    #[test]
+    #[should_panic = "epoch protection is not acquired"]
+    fn force_refresh_without_acquire() {
+        struct PanicGuard<'a>(&'a EpochParticipant<'a>);
+
+        impl Drop for PanicGuard<'_> {
+            fn drop(&mut self) {
+                self.0.force_release();
+            }
+        }
+
+        let epoch_fw = new_epoch_fw();
+        let participant = epoch_fw.participant();
+        let _guard = PanicGuard(&participant);
+        participant.force_refresh();
+    }
+
+    #[test]
+    #[should_panic = "epoch protection is already released"]
+    fn force_release_without_acquire() {
+        let epoch_fw = new_epoch_fw();
+        let participant = epoch_fw.participant();
+        participant.force_release();
     }
 }
