@@ -2,8 +2,8 @@ use super::{ConcurrencyControl, ConcurrencyControlInternal, TransactionExecutor}
 use crate::{
     epoch::EpochGuard,
     lock::Lock,
+    memory_reclamation::Reclaimer,
     persistence::{LogEntry, LogWriter},
-    qsbr::{Qsbr, QsbrGuard},
     record,
     small_bytes::SmallBytes,
     tid::{Tid, TidGenerator},
@@ -23,8 +23,7 @@ use std::{
 /// NO_WAIT deadlock prevention.
 #[allow(clippy::doc_markdown)]
 pub struct Pessimistic {
-    qsbr: Qsbr,
-    gc_threshold: usize,
+    _private: (), // Ensures forward compatibility when a field is added.
 }
 
 impl ConcurrencyControl for Pessimistic {}
@@ -33,11 +32,8 @@ impl ConcurrencyControlInternal for Pessimistic {
     type Record = Record;
     type Executor<'a> = Executor<'a>;
 
-    fn init(gc_threshold: usize) -> Self {
-        Self {
-            qsbr: Default::default(),
-            gc_threshold,
-        }
+    fn init() -> Self {
+        Self { _private: () }
     }
 
     fn load_log_entry(
@@ -76,15 +72,14 @@ impl ConcurrencyControlInternal for Pessimistic {
         &'a self,
         index: &'a Index<Self::Record>,
         epoch_guard: EpochGuard<'a>,
+        reclaimer: Reclaimer<'a, Self::Record>,
     ) -> Self::Executor<'a> {
         Self::Executor {
             index,
-            global: self,
             epoch_guard,
+            reclaimer,
             tid_generator: Default::default(),
-            qsbr_guard: self.qsbr.acquire(),
             removal_queue: Default::default(),
-            garbage_records: Default::default(),
             rw_set: Default::default(),
         }
     }
@@ -125,14 +120,12 @@ impl record::Record for Record {
 pub struct Executor<'a> {
     // Global state
     index: &'a Index<Record>,
-    global: &'a Pessimistic,
 
     // Per-executor state
     epoch_guard: EpochGuard<'a>,
+    reclaimer: Reclaimer<'a, Record>,
     tid_generator: TidGenerator,
-    qsbr_guard: QsbrGuard<'a>,
     removal_queue: VecDeque<(SmallBytes, Tid)>,
-    garbage_records: Vec<Shared<Record>>,
 
     // Per-transaction state
     rw_set: Vec<RwItem>,
@@ -141,21 +134,15 @@ pub struct Executor<'a> {
 impl TransactionExecutor for Executor<'_> {
     fn begin_transaction(&mut self) {
         self.rw_set.clear();
-        self.qsbr_guard.quiesce();
+        std::mem::forget(self.reclaimer.enter());
         self.epoch_guard.refresh();
     }
 
     fn end_transaction(&mut self) {
         self.epoch_guard.release();
-        self.qsbr_guard.mark_as_offline();
+        self.reclaimer.force_leave();
         self.process_removal_queue();
-        let garbage_bytes = self
-            .garbage_records
-            .len()
-            .saturating_mul(std::mem::size_of::<Record>());
-        if garbage_bytes >= self.global.gc_threshold {
-            self.collect_garbage();
-        }
+        self.reclaimer.reclaim();
     }
 
     fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>> {
@@ -299,7 +286,8 @@ impl TransactionExecutor for Executor<'_> {
                     // prevention.
                     assert!(record.lock.is_locked_exclusive());
                     self.index.remove(&item.key);
-                    self.garbage_records.push(item.record_ptr);
+                    self.reclaimer
+                        .defer_drop(unsafe { item.record_ptr.into_box() });
                 }
                 ItemKind::Read => {
                     record.lock.force_unlock_read();
@@ -322,7 +310,8 @@ impl TransactionExecutor for Executor<'_> {
             if item.was_vacant {
                 assert!(record.lock.is_locked_exclusive());
                 self.index.remove(&item.key);
-                self.garbage_records.push(item.record_ptr);
+                self.reclaimer
+                    .defer_drop(unsafe { item.record_ptr.into_box() });
                 continue;
             }
             match item.kind {
@@ -344,30 +333,18 @@ impl Executor<'_> {
                 break;
             }
             let (key, tid) = self.removal_queue.pop_front().unwrap();
-            self.qsbr_guard.quiesce();
+            let mut enter_guard = self.reclaimer.enter();
             self.index.remove_if(&key, |record_ptr| {
                 let record = unsafe { record_ptr.as_ref() };
-                let guard = record.lock.write();
+                let write_guard = record.lock.write();
                 if record.tid.get() != tid {
                     return false;
                 }
                 assert!(unsafe { record.get() }.is_none());
-                std::mem::forget(guard);
-                self.garbage_records.push(*record_ptr);
+                std::mem::forget(write_guard);
+                enter_guard.defer_drop(unsafe { record_ptr.into_box() });
                 true
             });
-            self.qsbr_guard.mark_as_offline();
-        }
-    }
-
-    fn collect_garbage(&mut self) {
-        if self.garbage_records.is_empty() {
-            return;
-        }
-        assert!(!self.qsbr_guard.is_online());
-        self.global.qsbr.sync();
-        for record_ptr in self.garbage_records.drain(..) {
-            unsafe { record_ptr.drop_in_place() };
         }
     }
 }
@@ -379,7 +356,6 @@ impl Drop for Executor<'_> {
             self.process_removal_queue();
             backoff.snooze();
         }
-        self.collect_garbage();
     }
 }
 

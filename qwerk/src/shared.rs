@@ -32,8 +32,12 @@ impl<T> Shared<T> {
         Self(Box::leak(Box::new(value)).into())
     }
 
+    pub unsafe fn into_box(self) -> Box<T> {
+        Box::from_raw(self.0.as_ptr())
+    }
+
     pub unsafe fn drop_in_place(self) {
-        let _ = Box::from_raw(self.0.as_ptr());
+        let _ = self.into_box();
     }
 
     pub const unsafe fn as_ref<'a>(self) -> &'a T {

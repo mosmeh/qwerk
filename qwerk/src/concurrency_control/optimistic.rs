@@ -1,8 +1,8 @@
 use super::{ConcurrencyControl, ConcurrencyControlInternal, Shared, TransactionExecutor};
 use crate::{
     epoch::EpochGuard,
+    memory_reclamation::Reclaimer,
     persistence::{LogEntry, LogWriter},
-    qsbr::{Qsbr, QsbrGuard},
     record,
     small_bytes::SmallBytes,
     tid::{Tid, TidGenerator},
@@ -21,8 +21,7 @@ use std::{
 ///
 /// This is an implementation of [Silo](https://doi.org/10.1145/2517349.2522713).
 pub struct Optimistic {
-    qsbr: Qsbr,
-    gc_threshold: usize,
+    _private: (), // Ensures forward compatibility when a field is added.
 }
 
 impl ConcurrencyControl for Optimistic {}
@@ -31,10 +30,9 @@ impl ConcurrencyControlInternal for Optimistic {
     type Record = Record;
     type Executor<'a> = Executor<'a>;
 
-    fn init(gc_threshold: usize) -> Self {
+    fn init() -> Self {
         Self {
-            qsbr: Default::default(),
-            gc_threshold,
+            _private: Default::default(),
         }
     }
 
@@ -80,17 +78,14 @@ impl ConcurrencyControlInternal for Optimistic {
         &'a self,
         index: &'a Index<Self::Record>,
         epoch_guard: EpochGuard<'a>,
+        reclaimer: Reclaimer<'a, Self::Record>,
     ) -> Self::Executor<'a> {
         Self::Executor {
             index,
-            global: self,
             epoch_guard,
+            reclaimer,
             tid_generator: Default::default(),
             removal_queue: Default::default(),
-            garbage_bytes: 0,
-            garbage_values: Default::default(),
-            garbage_records: Default::default(),
-            qsbr_guard: self.qsbr.acquire(),
             read_set: Default::default(),
             write_set: Default::default(),
         }
@@ -196,18 +191,14 @@ struct RecordSnapshot<'a> {
 pub struct Executor<'a> {
     // Global state
     index: &'a Index<Record>,
-    global: &'a Optimistic,
 
     // Per-executor state
     epoch_guard: EpochGuard<'a>,
+    reclaimer: Reclaimer<'a, Record>,
     tid_generator: TidGenerator,
     removal_queue: VecDeque<(SmallBytes, Tid)>,
-    garbage_bytes: usize,
-    garbage_values: Vec<Box<[u8]>>,
-    garbage_records: Vec<Shared<Record>>,
 
     // Per-transaction state
-    qsbr_guard: QsbrGuard<'a>,
     read_set: Vec<ReadItem<'a>>,
     write_set: Vec<WriteItem>,
 }
@@ -216,17 +207,15 @@ impl TransactionExecutor for Executor<'_> {
     fn begin_transaction(&mut self) {
         self.read_set.clear();
         self.write_set.clear();
-        self.qsbr_guard.quiesce();
+        std::mem::forget(self.reclaimer.enter());
         self.epoch_guard.refresh();
     }
 
     fn end_transaction(&mut self) {
         self.epoch_guard.release();
-        self.qsbr_guard.mark_as_offline();
+        self.reclaimer.force_leave();
         self.process_removal_queue();
-        if self.garbage_bytes >= self.global.gc_threshold {
-            self.collect_garbage();
-        }
+        self.reclaimer.reclaim();
     }
 
     fn read(&mut self, key: &[u8]) -> Result<Option<&[u8]>> {
@@ -397,10 +386,9 @@ impl TransactionExecutor for Executor<'_> {
             record.tid.store(commit_tid.0, SeqCst);
 
             if !prev_buf_ptr.is_null() {
-                self.garbage_values.push(unsafe {
+                self.reclaimer.defer_drop_bytes(unsafe {
                     Box::from_raw(std::slice::from_raw_parts_mut(prev_buf_ptr, prev_len))
                 });
-                self.garbage_bytes += prev_len;
             }
             if new_buf_ptr.is_null() {
                 self.removal_queue.push_back((item.key, commit_tid));
@@ -429,8 +417,8 @@ impl TransactionExecutor for Executor<'_> {
             record.tid.store(new_tid.0, SeqCst); // unlock
 
             if target.was_vacant {
-                self.garbage_records.push(target.record_ptr);
-                self.garbage_bytes += std::mem::size_of::<Record>();
+                self.reclaimer
+                    .defer_drop(unsafe { target.record_ptr.into_box() });
             }
         }
     }
@@ -444,7 +432,7 @@ impl Executor<'_> {
                 break;
             }
             let (key, tid) = self.removal_queue.pop_front().unwrap();
-            self.qsbr_guard.quiesce();
+            let mut enter_guard = self.reclaimer.enter();
             self.index.remove_if(&key, |record_ptr| {
                 let record = unsafe { record_ptr.as_ref() };
                 let Some(current_tid) = record.lock_if_present() else {
@@ -458,25 +446,10 @@ impl Executor<'_> {
                 assert!(record.buf_ptr.load(SeqCst).is_null());
                 assert_eq!(record.len.load(SeqCst), 0);
                 record.tid.store(current_tid.with_absent().0, SeqCst); // unlock
-                self.garbage_records.push(*record_ptr);
-                self.garbage_bytes += std::mem::size_of::<Record>();
+                enter_guard.defer_drop(unsafe { record_ptr.into_box() });
                 true
             });
-            self.qsbr_guard.mark_as_offline();
         }
-    }
-
-    fn collect_garbage(&mut self) {
-        if self.garbage_values.is_empty() && self.garbage_records.is_empty() {
-            return;
-        }
-        assert!(!self.qsbr_guard.is_online());
-        self.global.qsbr.sync();
-        self.garbage_values.clear();
-        for record_ptr in self.garbage_records.drain(..) {
-            unsafe { record_ptr.drop_in_place() };
-        }
-        self.garbage_bytes = 0;
     }
 }
 
@@ -487,7 +460,6 @@ impl Drop for Executor<'_> {
             self.process_removal_queue();
             backoff.snooze();
         }
-        self.collect_garbage();
     }
 }
 
