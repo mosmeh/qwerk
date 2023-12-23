@@ -6,6 +6,7 @@ pub use pessimistic::Pessimistic;
 
 use crate::{
     epoch::EpochGuard,
+    memory_reclamation::Reclaimer,
     persistence::{LogEntry, LogWriter},
     record::Record,
     small_bytes::SmallBytes,
@@ -21,7 +22,7 @@ pub trait ConcurrencyControlInternal: Send + Sync + 'static {
     where
         Self: 'a;
 
-    fn init(gc_threshold: usize) -> Self;
+    fn init() -> Self;
 
     /// Loads a log entry into `index`.
     ///
@@ -44,6 +45,7 @@ pub trait ConcurrencyControlInternal: Send + Sync + 'static {
         &'a self,
         index: &'a Index<Self::Record>,
         epoch_guard: EpochGuard<'a>,
+        reclaimer: Reclaimer<'a, Self::Record>,
     ) -> Self::Executor<'a>;
 }
 
