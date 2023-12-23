@@ -9,6 +9,7 @@ use crate::{
 };
 use crossbeam_utils::{Backoff, CachePadded};
 use std::{
+    fmt::{Display, Formatter},
     sync::{
         atomic::{AtomicU32, Ordering::SeqCst},
         Arc,
@@ -29,6 +30,12 @@ const OFFLINE_EPOCH: u32 = u32::MAX;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Epoch(pub u32);
+
+impl Display for Epoch {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 impl Epoch {
     #[must_use]

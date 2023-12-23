@@ -21,6 +21,7 @@ use std::{
 ///
 /// This is an implementation of strong strict two phase locking with
 /// NO_WAIT deadlock prevention.
+#[allow(clippy::doc_markdown)]
 pub struct Pessimistic {
     qsbr: Qsbr,
     gc_threshold: usize,

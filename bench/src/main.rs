@@ -152,6 +152,10 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> Result<()> {
         })
         .collect();
 
+    eprintln!("Populating database");
+    shared.barrier.wait();
+    shared.db.flush()?;
+
     eprintln!("Start");
     shared.barrier.wait();
 
@@ -234,8 +238,9 @@ fn run_worker<C: ConcurrencyControl>(
         txn.insert(key, &payload).unwrap();
         txn.precommit().unwrap();
     }
+    shared.barrier.wait(); // Signal that the database is populated
 
-    shared.barrier.wait();
+    shared.barrier.wait(); // Signal that the benchmark will start
     while shared.is_running.load(Ordering::SeqCst) {
         let op = OPERATIONS[op_dist.sample(&mut rng)];
         let mut txn = worker.begin_transaction();

@@ -23,9 +23,9 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let db = Database::<Pessimistic>::open(&cli.path)?;
+    let mut worker = db.spawn_worker();
     match cli.command {
         Command::Get { key } => {
-            let mut worker = db.spawn_worker();
             let mut txn = worker.begin_transaction();
             if let Some(value) = txn.get(&key)? {
                 println!("{}", String::from_utf8_lossy(value));
@@ -33,7 +33,6 @@ fn main() -> Result<()> {
             txn.commit()?;
         }
         Command::Insert { key, value } => {
-            let mut worker = db.spawn_worker();
             let mut txn = worker.begin_transaction();
             if let Some(value) = txn.get(&key)? {
                 println!("{}", String::from_utf8_lossy(value));
@@ -42,7 +41,6 @@ fn main() -> Result<()> {
             txn.commit()?;
         }
         Command::Remove { key } => {
-            let mut worker = db.spawn_worker();
             let mut txn = worker.begin_transaction();
             if let Some(value) = txn.get(&key)? {
                 println!("{}", String::from_utf8_lossy(value));
@@ -50,7 +48,7 @@ fn main() -> Result<()> {
             txn.remove(&key)?;
             txn.commit()?;
         }
-        Command::Epoch => println!("{}", db.durable_epoch().0),
+        Command::Epoch => println!("{}", db.durable_epoch()),
     }
     Ok(())
 }
