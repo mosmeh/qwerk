@@ -81,3 +81,45 @@ impl ByteVecExt for Vec<u8> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn read_write_bytes() {
+        use super::{ReadBytesExt, WriteBytesExt};
+
+        let mut buf = Vec::new();
+        buf.write_u64(42).unwrap();
+        buf.write_bytes(b"foo").unwrap();
+
+        let mut buf = buf.as_slice();
+        assert_eq!(buf.read_u64().unwrap(), 42);
+        assert_eq!(buf.read_bytes().unwrap(), b"foo");
+    }
+
+    #[test]
+    fn bytes() {
+        use super::BytesExt;
+
+        let mut buf = vec![0; 10];
+        buf.set_u64(2, 42);
+        assert_eq!(buf, [0, 0, 42, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn byte_vec() {
+        use super::{ByteVecExt, ReadBytesExt};
+
+        let mut buf = Vec::new();
+        buf.write_u64(42);
+        buf.write_bytes(b"foo");
+        buf.write_maybe_bytes(Some(b"bar"));
+        buf.write_maybe_bytes(None);
+
+        let mut buf = buf.as_slice();
+        assert_eq!(buf.read_u64().unwrap(), 42);
+        assert_eq!(buf.read_bytes().unwrap(), b"foo");
+        assert_eq!(buf.read_maybe_bytes().unwrap(), Some(b"bar".to_vec()));
+        assert_eq!(buf.read_maybe_bytes().unwrap(), None);
+    }
+}

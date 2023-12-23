@@ -72,8 +72,8 @@ impl Lock {
     #[must_use]
     pub fn try_upgrade(&self) -> Option<WriteGuard> {
         let current = self.0.load(SeqCst);
-        assert_eq!(current & WRITER, 0);
-        assert!(current >= READER);
+        assert_eq!(current & WRITER, 0, "lock is write-locked");
+        assert!(current >= READER, "lock is not read-locked");
         let num_readers = current >> 1;
         if num_readers > 1 {
             return None;
@@ -90,8 +90,8 @@ impl Lock {
     /// Panics if the lock is not read-locked.
     pub fn force_unlock_read(&self) {
         let prev = self.0.fetch_sub(READER, SeqCst);
-        assert_eq!(prev & WRITER, 0);
-        assert!(prev >= READER);
+        assert_eq!(prev & WRITER, 0, "lock is write-locked");
+        assert!(prev >= READER, "lock is not read-locked");
     }
 
     /// Forcibly unlock a write lock.
@@ -100,7 +100,7 @@ impl Lock {
     /// Panics if the lock is not write-locked.
     pub fn force_unlock_write(&self) {
         let prev = self.0.swap(0, SeqCst);
-        assert_eq!(prev, WRITER);
+        assert_eq!(prev, WRITER, "lock is not write-locked");
     }
 
     fn try_lock_shared(&self) -> bool {
@@ -136,5 +136,81 @@ pub struct WriteGuard<'a>(&'a Lock);
 impl Drop for WriteGuard<'_> {
     fn drop(&mut self) {
         self.0.force_unlock_write();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Lock;
+
+    #[test]
+    fn shared() {
+        let lock = Lock::new_unlocked();
+        assert!(!lock.is_locked());
+        assert!(!lock.is_locked_exclusive());
+        {
+            let _read_guard = lock.read();
+            assert!(lock.is_locked());
+            assert!(!lock.is_locked_exclusive());
+            assert!(lock.try_read().is_some());
+            assert!(lock.try_write().is_none());
+        }
+        {
+            std::mem::forget(lock.read());
+            assert!(lock.is_locked());
+            assert!(!lock.is_locked_exclusive());
+            lock.force_unlock_read();
+        }
+    }
+
+    #[test]
+    fn exclusive() {
+        let lock = Lock::new_unlocked();
+        {
+            let _write_guard = lock.write();
+            assert!(lock.is_locked());
+            assert!(lock.is_locked_exclusive());
+            assert!(lock.try_read().is_none());
+            assert!(lock.try_write().is_none());
+        }
+        {
+            std::mem::forget(lock.write());
+            assert!(lock.is_locked());
+            assert!(lock.is_locked_exclusive());
+            lock.force_unlock_write();
+        }
+    }
+
+    #[test]
+    fn upgrade() {
+        let lock = Lock::new_unlocked();
+        std::mem::forget(lock.read());
+        {
+            let _write_guard = lock.try_upgrade().unwrap();
+            assert!(lock.is_locked_exclusive());
+            assert!(lock.try_read().is_none());
+        }
+        assert!(!lock.is_locked());
+    }
+
+    #[test]
+    #[should_panic = "lock is not read-locked"]
+    fn force_unlock_read_not_read_locked() {
+        let lock = Lock::new_unlocked();
+        lock.force_unlock_read();
+    }
+
+    #[test]
+    #[should_panic = "lock is not write-locked"]
+    fn force_unlock_write_not_write_locked() {
+        let lock = Lock::new_unlocked();
+        lock.force_unlock_write();
+    }
+
+    #[test]
+    #[should_panic = "lock is not read-locked"]
+    fn upgrade_not_read_locked() {
+        let lock = Lock::new_unlocked();
+        lock.try_upgrade().unwrap();
     }
 }

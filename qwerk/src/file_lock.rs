@@ -1,5 +1,6 @@
 use std::{fs::File, path::Path};
 
+#[derive(Debug)]
 pub struct FileLock {
     _file: File,
 }
@@ -76,3 +77,47 @@ mod sys {
 
 #[cfg(not(any(unix, windows)))]
 compile_error!("unsupported platform");
+
+#[cfg(test)]
+mod tests {
+    use super::FileLock;
+    use std::fs::File;
+    use tempfile::tempdir;
+
+    #[test]
+    fn lock_new_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("lock");
+        {
+            let _lock = FileLock::try_lock_exclusive(&path).unwrap().unwrap();
+            assert!(FileLock::try_lock_exclusive(&path).unwrap().is_none());
+        }
+        FileLock::try_lock_exclusive(path).unwrap().unwrap();
+    }
+
+    #[test]
+    fn lock_existing_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("lock");
+        let _file = File::create(&path).unwrap();
+        {
+            let _lock = FileLock::try_lock_exclusive(&path).unwrap().unwrap();
+            assert!(FileLock::try_lock_exclusive(&path).unwrap().is_none());
+        }
+        FileLock::try_lock_exclusive(path).unwrap().unwrap();
+    }
+
+    #[test]
+    fn lock_readonly_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("lock");
+        let file = File::create(&path).unwrap();
+
+        let mut permissions = file.metadata().unwrap().permissions();
+        permissions.set_readonly(true);
+        file.set_permissions(permissions).unwrap();
+
+        let err = FileLock::try_lock_exclusive(&path).unwrap_err();
+        assert!(err.kind() == std::io::ErrorKind::PermissionDenied);
+    }
+}
