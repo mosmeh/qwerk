@@ -3,8 +3,8 @@ mod concurrency_control;
 mod epoch;
 mod file_lock;
 mod lock;
+mod memory_reclamation;
 mod persistence;
-mod qsbr;
 mod shared;
 mod signal_channel;
 mod slotted_cell;
@@ -19,6 +19,7 @@ pub use transaction::Transaction;
 use concurrency_control::TransactionExecutor;
 use epoch::EpochFramework;
 use file_lock::FileLock;
+use memory_reclamation::MemoryReclamation;
 use persistence::{LogWriter, Logger, LoggerConfig, PersistentEpoch};
 use scc::HashIndex;
 use shared::Shared;
@@ -119,12 +120,12 @@ impl DatabaseOptions {
             preallocated_buffer_size: self.log_buffer_size_bytes,
             buffers_per_writer: self.log_buffers_per_worker,
         })?;
-        let concurrency_control = C::init(self.gc_threshold);
 
         Ok(Database {
             index,
-            concurrency_control,
+            concurrency_control: C::init(),
             epoch_fw,
+            reclamation: MemoryReclamation::new(self.gc_threshold),
             logger,
             persistent_epoch,
             _file_lock: file_lock,
@@ -178,6 +179,7 @@ pub struct Database<C: ConcurrencyControl> {
     index: Index<C::Record>,
     concurrency_control: C,
     epoch_fw: Arc<EpochFramework>,
+    reclamation: MemoryReclamation,
     logger: Logger,
     persistent_epoch: Arc<PersistentEpoch>,
     _file_lock: FileLock,
@@ -195,10 +197,13 @@ impl<C: ConcurrencyControl> Database<C> {
     /// [`Worker`] for multiple transactions.
     pub fn spawn_worker(&self) -> Worker<C> {
         let epoch_guard = self.epoch_fw.acquire();
+        let reclaimer = self.reclamation.reclaimer();
         Worker {
-            txn_executor: self
-                .concurrency_control
-                .spawn_executor(&self.index, epoch_guard),
+            txn_executor: self.concurrency_control.spawn_executor(
+                &self.index,
+                epoch_guard,
+                reclaimer,
+            ),
             log_writer: self.logger.spawn_writer(),
             persistent_epoch: &self.persistent_epoch,
         }
