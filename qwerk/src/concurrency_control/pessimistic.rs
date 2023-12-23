@@ -22,8 +22,15 @@ use std::{
 /// This is an implementation of strong strict two phase locking with
 /// NO_WAIT deadlock prevention.
 #[allow(clippy::doc_markdown)]
+#[derive(Default)]
 pub struct Pessimistic {
     _private: (), // Ensures forward compatibility when a field is added.
+}
+
+impl Pessimistic {
+    pub fn new() -> Self {
+        Default::default()
+    }
 }
 
 impl ConcurrencyControl for Pessimistic {}
@@ -31,10 +38,6 @@ impl ConcurrencyControl for Pessimistic {}
 impl ConcurrencyControlInternal for Pessimistic {
     type Record = Record;
     type Executor<'a> = Executor<'a>;
-
-    fn init() -> Self {
-        Self { _private: () }
-    }
 
     fn load_log_entry(
         index: &Index<Self::Record>,

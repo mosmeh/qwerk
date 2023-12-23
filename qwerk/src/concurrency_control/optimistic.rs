@@ -20,8 +20,15 @@ use std::{
 /// Optimistic concurrency control.
 ///
 /// This is an implementation of [Silo](https://doi.org/10.1145/2517349.2522713).
+#[derive(Default)]
 pub struct Optimistic {
     _private: (), // Ensures forward compatibility when a field is added.
+}
+
+impl Optimistic {
+    pub fn new() -> Self {
+        Default::default()
+    }
 }
 
 impl ConcurrencyControl for Optimistic {}
@@ -29,12 +36,6 @@ impl ConcurrencyControl for Optimistic {}
 impl ConcurrencyControlInternal for Optimistic {
     type Record = Record;
     type Executor<'a> = Executor<'a>;
-
-    fn init() -> Self {
-        Self {
-            _private: Default::default(),
-        }
-    }
 
     fn load_log_entry(
         index: &Index<Self::Record>,

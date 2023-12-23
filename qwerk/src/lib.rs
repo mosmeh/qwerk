@@ -12,7 +12,7 @@ mod small_bytes;
 mod tid;
 mod transaction;
 
-pub use concurrency_control::{ConcurrencyControl, Optimistic, Pessimistic};
+pub use concurrency_control::{ConcurrencyControl, DefaultProtocol, Optimistic, Pessimistic};
 pub use epoch::Epoch;
 pub use transaction::Transaction;
 
@@ -54,7 +54,8 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub struct DatabaseOptions {
+pub struct DatabaseOptions<C: ConcurrencyControl = DefaultProtocol> {
+    concurrency_control: C,
     background_threads: NonZeroUsize,
     epoch_duration: Duration,
     gc_threshold: usize,
@@ -62,9 +63,10 @@ pub struct DatabaseOptions {
     log_buffers_per_worker: NonZeroUsize,
 }
 
-impl Default for DatabaseOptions {
+impl<C: ConcurrencyControl> Default for DatabaseOptions<C> {
     fn default() -> Self {
         Self {
+            concurrency_control: Default::default(),
             background_threads: std::thread::available_parallelism()
                 .map_or(1, |n| n.get().min(4))
                 .try_into()
@@ -77,17 +79,24 @@ impl Default for DatabaseOptions {
     }
 }
 
-impl DatabaseOptions {
+impl DatabaseOptions<DefaultProtocol> {
     pub fn new() -> Self {
         Default::default()
     }
+}
+
+impl<C: ConcurrencyControl> DatabaseOptions<C> {
+    /// Creates a new options object with the given concurrency control
+    /// protocol.
+    pub fn with_concurrency_control(concurrency_control: C) -> Self {
+        Self {
+            concurrency_control,
+            ..Default::default()
+        }
+    }
 
     /// Opens a database at the given path, creating it if it does not exist.
-    pub fn open<C, P>(&self, path: P) -> Result<Database<C>>
-    where
-        C: ConcurrencyControl,
-        P: AsRef<Path>,
-    {
+    pub fn open<P: AsRef<Path>>(self, path: P) -> Result<Database<C>> {
         let dir = path.as_ref();
         match std::fs::create_dir(dir) {
             Ok(()) => (),
@@ -123,7 +132,7 @@ impl DatabaseOptions {
 
         Ok(Database {
             index,
-            concurrency_control: C::init(),
+            concurrency_control: self.concurrency_control,
             epoch_fw,
             reclamation: MemoryReclamation::new(self.gc_threshold),
             logger,
@@ -134,13 +143,15 @@ impl DatabaseOptions {
 
     /// The number of background threads used for logging and recovery.
     /// Defaults to the smaller of the number of CPU cores and 4.
-    pub fn background_threads(&mut self, n: NonZeroUsize) -> &mut Self {
+    #[must_use]
+    pub fn background_threads(mut self, n: NonZeroUsize) -> Self {
         self.background_threads = n;
         self
     }
 
     /// The duration of an epoch. Defaults to 40 milliseconds.
-    pub fn epoch_duration(&mut self, duration: Duration) -> &mut Self {
+    #[must_use]
+    pub fn epoch_duration(mut self, duration: Duration) -> Self {
         self.epoch_duration = duration;
         self
     }
@@ -148,20 +159,23 @@ impl DatabaseOptions {
     /// Workers perform garbage collection of removed records and old versions
     /// of record values when this number of bytes of garbage is accumulated.
     /// Defaults to 4 KiB.
-    pub fn gc_threshold(&mut self, bytes: usize) -> &mut Self {
+    #[must_use]
+    pub fn gc_threshold(mut self, bytes: usize) -> Self {
         self.gc_threshold = bytes;
         self
     }
 
     /// The size of a log buffer in bytes. Workers pass logs to log flushing
     /// threads in chunks of this size. Defaults to 1 MiB.
-    pub fn log_buffer_size(&mut self, bytes: usize) -> &mut Self {
+    #[must_use]
+    pub fn log_buffer_size(mut self, bytes: usize) -> Self {
         self.log_buffer_size_bytes = bytes;
         self
     }
 
     /// The number of log buffers per worker. Defaults to 8.
-    pub fn log_buffers_per_worker(&mut self, n: NonZeroUsize) -> &mut Self {
+    #[must_use]
+    pub fn log_buffers_per_worker(mut self, n: NonZeroUsize) -> Self {
         self.log_buffers_per_worker = n;
         self
     }
@@ -175,7 +189,7 @@ mod record {
     }
 }
 
-pub struct Database<C: ConcurrencyControl> {
+pub struct Database<C: ConcurrencyControl = DefaultProtocol> {
     index: Index<C::Record>,
     concurrency_control: C,
     epoch_fw: Arc<EpochFramework>,
@@ -185,12 +199,14 @@ pub struct Database<C: ConcurrencyControl> {
     _file_lock: FileLock,
 }
 
-impl<C: ConcurrencyControl> Database<C> {
+impl Database<DefaultProtocol> {
     /// Opens a database at the given path, creating it if it does not exist.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         DatabaseOptions::new().open(path)
     }
+}
 
+impl<C: ConcurrencyControl> Database<C> {
     /// Spawns a [`Worker`], which can be used to perform transactions.
     ///
     /// You usually should spawn one [`Worker`] per thread, and reuse the
@@ -235,7 +251,7 @@ impl<C: ConcurrencyControl> Drop for Database<C> {
     }
 }
 
-pub struct Worker<'a, C: ConcurrencyControl + 'a> {
+pub struct Worker<'a, C: ConcurrencyControl + 'a = DefaultProtocol> {
     txn_executor: C::Executor<'a>,
     log_writer: LogWriter<'a>,
     persistent_epoch: &'a PersistentEpoch,

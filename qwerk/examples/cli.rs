@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use qwerk::{Database, Pessimistic};
+use qwerk::Database;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -22,7 +22,7 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let db = Database::<Pessimistic>::open(&cli.path)?;
+    let db = Database::open(&cli.path)?;
     let mut worker = db.spawn_worker();
     match cli.command {
         Command::Get { key } => {
