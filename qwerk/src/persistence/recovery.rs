@@ -12,16 +12,11 @@ pub fn recover<C: ConcurrencyControl>(
     durable_epoch: Epoch,
     num_threads: NonZeroUsize,
 ) -> std::io::Result<Index<C::Record>> {
-    let dir_entries = match std::fs::read_dir(dir) {
-        Ok(dir_entries) => dir_entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
-        Err(e) => return Err(e),
-    };
     let queue = SegQueue::new();
-    for dir_entry in dir_entries {
-        let dir_entry = dir_entry?;
-        if super::is_log_file(&dir_entry.path()) {
-            queue.push(dir_entry.path());
+    for dir_entry in std::fs::read_dir(dir)? {
+        let path = dir_entry?.path();
+        if super::is_log_file(&path) {
+            queue.push(path);
         }
     }
     if queue.is_empty() {
@@ -37,13 +32,11 @@ pub fn recover<C: ConcurrencyControl>(
     let threads: Vec<_> = (0..num_threads)
         .map(|_| {
             let shared = shared.clone();
-            std::thread::spawn(move || {
-                run_log_replayer::<C>(&shared, durable_epoch).unwrap();
-            })
+            std::thread::spawn(move || run_log_replayer::<C>(&shared, durable_epoch))
         })
         .collect();
     for thread in threads {
-        thread.join().unwrap();
+        thread.join().unwrap()?;
     }
 
     let SharedState { index, queue } = Arc::into_inner(shared).expect("all threads have exited");
@@ -58,7 +51,12 @@ pub fn recover<C: ConcurrencyControl>(
     });
 
     // TODO: replace log files with checkpoints. For now, just delete the log files.
-    std::fs::remove_dir_all(dir)?;
+    for dir_entry in std::fs::read_dir(dir)? {
+        let path = dir_entry?.path();
+        if super::is_log_file(&path) {
+            std::fs::remove_file(path)?;
+        }
+    }
 
     Ok(index)
 }

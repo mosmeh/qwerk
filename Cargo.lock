@@ -349,9 +349,9 @@ checksum = "f98d2aa92eebf49b69786be48e4477826b256916e84a57ff2a4f21923b48eb4c"
 
 [[package]]
 name = "scc"
-version = "2.0.6"
+version = "2.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6624f44be6e67bcef42d9a241f431635f6a50a9ec55dc7e2133a1cfdc47cf755"
+checksum = "60da9a72c824ff528dbae0c744d24b9f039dcde49cca9dd2f34438d5b0a1578c"
 
 [[package]]
 name = "scopeguard"

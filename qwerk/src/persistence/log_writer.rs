@@ -81,7 +81,7 @@ impl Logger {
             let flush_req_tx = flush_req_tx.clone();
             std::thread::Builder::new()
                 .name("log_system_daemon".into())
-                .spawn(move || run_daemon(&config, &channels, flush_req_tx, stop_rx))
+                .spawn(move || run_daemon(&config, &channels, flush_req_tx, stop_rx).unwrap())
                 .unwrap()
         };
 
@@ -157,7 +157,7 @@ fn run_daemon(
     channels: &SlottedCell<LogChannel>,
     flush_req_tx: crossbeam_channel::Sender<FlushRequest>,
     stop_rx: signal_channel::Receiver,
-) {
+) -> std::io::Result<()> {
     while !stop_rx.recv_timeout(config.epoch_fw.epoch_duration()) {
         for channel in channels.iter() {
             // Failure of this lock means that a writer is writing to
@@ -189,8 +189,9 @@ fn run_daemon(
         }
 
         // 3. Update and persist the global durable epoch.
-        config.persistent_epoch.update(channels).unwrap();
+        config.persistent_epoch.update(channels)?;
     }
+    Ok(())
 }
 
 /// Global durable epoch persisted to the disk.
@@ -315,7 +316,7 @@ pub struct LogWriter<'a> {
 }
 
 impl LogWriter<'_> {
-    pub fn reserver(&self) -> CapacityReserver {
+    pub const fn reserver(&self) -> CapacityReserver {
         CapacityReserver {
             writer: self,
             num_bytes: std::mem::size_of::<u64>() * 2, // tid and num_records
@@ -423,7 +424,7 @@ impl LogEntry<'_> {
         self.num_records += 1;
     }
 
-    pub fn epoch(&self) -> Epoch {
+    pub const fn epoch(&self) -> Epoch {
         self.epoch
     }
 

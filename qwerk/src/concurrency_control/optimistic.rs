@@ -545,13 +545,10 @@ trait IntoRawParts {
 
 impl IntoRawParts for Option<Box<[u8]>> {
     fn into_raw_parts(self) -> (*mut u8, usize) {
-        match self {
-            Some(value) => {
-                let len = value.len();
-                let ptr = Box::into_raw(value).cast();
-                (ptr, len)
-            }
-            None => (std::ptr::null_mut(), 0),
-        }
+        self.map_or((std::ptr::null_mut(), 0), |value| {
+            let len = value.len();
+            let ptr = Box::into_raw(value).cast();
+            (ptr, len)
+        })
     }
 }
