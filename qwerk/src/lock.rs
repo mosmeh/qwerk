@@ -28,6 +28,7 @@ impl Lock {
         self.0.load(SeqCst) & WRITER != 0
     }
 
+    #[must_use]
     pub fn read(&self) -> ReadGuard {
         let backoff = Backoff::new();
         while !self.try_lock_shared() {
@@ -36,6 +37,7 @@ impl Lock {
         ReadGuard(self)
     }
 
+    #[must_use]
     pub fn write(&self) -> WriteGuard {
         let backoff = Backoff::new();
         while !self.try_lock_exclusive() {
@@ -44,12 +46,14 @@ impl Lock {
         WriteGuard(self)
     }
 
+    #[must_use]
     pub fn try_read(&self) -> Option<ReadGuard> {
         // We shouldn't use then_some(ReadGuard(self)) here because
         // we don't want to drop() the guard if we fail to acquire the lock.
         self.try_lock_shared().then(|| ReadGuard(self))
     }
 
+    #[must_use]
     pub fn try_write(&self) -> Option<WriteGuard> {
         self.try_lock_exclusive().then(|| WriteGuard(self))
     }
@@ -65,6 +69,7 @@ impl Lock {
     ///
     /// # Panics
     /// Panics if the lock is not read-locked.
+    #[must_use]
     pub fn try_upgrade(&self) -> Option<WriteGuard> {
         let current = self.0.load(SeqCst);
         assert_eq!(current & WRITER, 0);
