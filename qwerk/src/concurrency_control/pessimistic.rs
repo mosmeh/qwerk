@@ -1,6 +1,6 @@
 use super::{ConcurrencyControl, ConcurrencyControlInternal, TransactionExecutor};
 use crate::{
-    epoch::EpochGuard,
+    epoch::EpochParticipant,
     lock::Lock,
     memory_reclamation::Reclaimer,
     persistence::{LogEntry, LogWriter},
@@ -71,12 +71,12 @@ impl ConcurrencyControlInternal for Pessimistic {
     fn spawn_executor<'a>(
         &'a self,
         index: &'a Index<Self::Record>,
-        epoch_guard: EpochGuard<'a>,
+        epoch_participant: EpochParticipant<'a>,
         reclaimer: Reclaimer<'a, Self::Record>,
     ) -> Self::Executor<'a> {
         Self::Executor {
             index,
-            epoch_guard,
+            epoch_participant,
             reclaimer,
             tid_generator: Default::default(),
             removal_queue: Default::default(),
@@ -122,7 +122,7 @@ pub struct Executor<'a> {
     index: &'a Index<Record>,
 
     // Per-executor state
-    epoch_guard: EpochGuard<'a>,
+    epoch_participant: EpochParticipant<'a>,
     reclaimer: Reclaimer<'a, Record>,
     tid_generator: TidGenerator,
     removal_queue: VecDeque<(SmallBytes, Tid)>,
@@ -135,11 +135,11 @@ impl TransactionExecutor for Executor<'_> {
     fn begin_transaction(&mut self) {
         self.rw_set.clear();
         std::mem::forget(self.reclaimer.enter());
-        self.epoch_guard.refresh();
+        std::mem::forget(self.epoch_participant.acquire());
     }
 
     fn end_transaction(&mut self) {
-        self.epoch_guard.release();
+        self.epoch_participant.force_release();
         self.reclaimer.force_leave();
         self.process_removal_queue();
         self.reclaimer.reclaim();
@@ -266,7 +266,7 @@ impl TransactionExecutor for Executor<'_> {
         }
         let reserved_log_capacity = log_capacity_reserver.finish();
 
-        let commit_epoch = self.epoch_guard.refresh();
+        let commit_epoch = self.epoch_participant.force_refresh();
         let commit_tid = tid_set
             .generate_tid(commit_epoch)
             .ok_or(Error::TooManyTransactions)?;
@@ -327,7 +327,7 @@ impl TransactionExecutor for Executor<'_> {
 
 impl Executor<'_> {
     fn process_removal_queue(&mut self) {
-        let reclamation_epoch = self.epoch_guard.reclamation_epoch();
+        let reclamation_epoch = self.epoch_participant.reclamation_epoch();
         while let Some((_, tid)) = self.removal_queue.front() {
             if tid.epoch() > reclamation_epoch {
                 break;

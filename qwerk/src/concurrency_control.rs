@@ -5,7 +5,7 @@ pub use optimistic::Optimistic;
 pub use pessimistic::Pessimistic;
 
 use crate::{
-    epoch::EpochGuard,
+    epoch::EpochParticipant,
     memory_reclamation::Reclaimer,
     persistence::{LogEntry, LogWriter},
     record::Record,
@@ -44,7 +44,7 @@ pub trait ConcurrencyControlInternal: Send + Sync + 'static {
     fn spawn_executor<'a>(
         &'a self,
         index: &'a Index<Self::Record>,
-        epoch_guard: EpochGuard<'a>,
+        epoch_participant: EpochParticipant<'a>,
         reclaimer: Reclaimer<'a, Self::Record>,
     ) -> Self::Executor<'a>;
 }
