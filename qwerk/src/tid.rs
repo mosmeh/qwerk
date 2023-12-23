@@ -131,7 +131,7 @@ mod tests {
     use crate::Epoch;
 
     #[test]
-    fn test_tid() {
+    fn tid() {
         let tid = Tid::from_epoch_and_sequence(Epoch(42), 35);
         assert_eq!(tid.epoch(), Epoch(42));
         assert_eq!(tid.sequence(), 35);

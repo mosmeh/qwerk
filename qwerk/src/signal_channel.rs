@@ -56,3 +56,18 @@ impl Receiver {
             .timed_out()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    #[test]
+    fn test() {
+        let (tx, rx) = super::channel();
+        assert!(!rx.recv_timeout(Duration::from_millis(0)));
+        assert!(!rx.recv_timeout(Duration::from_millis(0)));
+        tx.send();
+        assert!(rx.recv_timeout(Duration::from_millis(0)));
+        assert!(rx.recv_timeout(Duration::from_millis(0)));
+    }
+}

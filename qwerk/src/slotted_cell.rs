@@ -264,7 +264,7 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     #[test]
-    fn test_alloc() {
+    fn alloc() {
         let cell = SlottedCell::<Cell<u32>>::default();
         let (ptr1, ptr2) = {
             let slot1 = cell.alloc();
@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn test_alloc_with() {
+    fn alloc_with() {
         let cell = SlottedCell::default();
         let slot1 = cell.alloc_with(|i| {
             assert_eq!(i, 0);
@@ -295,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get() {
+    fn get() {
         let cell = SlottedCell::<Cell<u32>>::default();
         let (ptr1, ptr2) = {
             let slot1 = cell.alloc();
@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn test_iter() {
+    fn iter() {
         let cell = SlottedCell::<Cell<u32>>::default();
         let (ptr1, ptr2) = {
             let slot1 = cell.alloc();
