@@ -1,6 +1,6 @@
 use super::{ConcurrencyControl, ConcurrencyControlInternal, Shared, TransactionExecutor};
 use crate::{
-    epoch::EpochGuard,
+    epoch::EpochParticipant,
     memory_reclamation::Reclaimer,
     persistence::{LogEntry, LogWriter},
     record,
@@ -77,12 +77,12 @@ impl ConcurrencyControlInternal for Optimistic {
     fn spawn_executor<'a>(
         &'a self,
         index: &'a Index<Self::Record>,
-        epoch_guard: EpochGuard<'a>,
+        epoch_participant: EpochParticipant<'a>,
         reclaimer: Reclaimer<'a, Self::Record>,
     ) -> Self::Executor<'a> {
         Self::Executor {
             index,
-            epoch_guard,
+            epoch_participant,
             reclaimer,
             tid_generator: Default::default(),
             removal_queue: Default::default(),
@@ -193,7 +193,7 @@ pub struct Executor<'a> {
     index: &'a Index<Record>,
 
     // Per-executor state
-    epoch_guard: EpochGuard<'a>,
+    epoch_participant: EpochParticipant<'a>,
     reclaimer: Reclaimer<'a, Record>,
     tid_generator: TidGenerator,
     removal_queue: VecDeque<(SmallBytes, Tid)>,
@@ -208,11 +208,11 @@ impl TransactionExecutor for Executor<'_> {
         self.read_set.clear();
         self.write_set.clear();
         std::mem::forget(self.reclaimer.enter());
-        self.epoch_guard.refresh();
+        std::mem::forget(self.epoch_participant.acquire());
     }
 
     fn end_transaction(&mut self) {
-        self.epoch_guard.release();
+        self.epoch_participant.force_release();
         self.reclaimer.force_leave();
         self.process_removal_queue();
         self.reclaimer.reclaim();
@@ -329,7 +329,7 @@ impl TransactionExecutor for Executor<'_> {
         }
 
         // Serialization point
-        let commit_epoch = self.epoch_guard.refresh();
+        let commit_epoch = self.epoch_participant.force_refresh();
 
         // Phase 2: validation phase
         for item in &self.read_set {
@@ -426,7 +426,7 @@ impl TransactionExecutor for Executor<'_> {
 
 impl Executor<'_> {
     fn process_removal_queue(&mut self) {
-        let reclamation_epoch = self.epoch_guard.reclamation_epoch();
+        let reclamation_epoch = self.epoch_participant.reclamation_epoch();
         while let Some((_, tid)) = self.removal_queue.front() {
             if tid.epoch() > reclamation_epoch {
                 break;

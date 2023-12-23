@@ -106,10 +106,10 @@ impl DatabaseOptions {
         let durable_epoch = persistent_epoch.get();
         let index = persistence::recover::<C>(&dir, durable_epoch, self.background_threads)?;
 
-        let epoch_fw = Arc::new(EpochFramework::new(epoch::Config {
-            initial_epoch: durable_epoch.increment(),
-            epoch_duration: self.epoch_duration,
-        }));
+        let epoch_fw = Arc::new(EpochFramework::new(
+            durable_epoch.increment(),
+            self.epoch_duration,
+        ));
 
         let persistent_epoch = Arc::new(persistent_epoch);
         let logger = Logger::new(LoggerConfig {
@@ -196,12 +196,12 @@ impl<C: ConcurrencyControl> Database<C> {
     /// You usually should spawn one [`Worker`] per thread, and reuse the
     /// [`Worker`] for multiple transactions.
     pub fn spawn_worker(&self) -> Worker<C> {
-        let epoch_guard = self.epoch_fw.acquire();
+        let epoch_participant = self.epoch_fw.participant();
         let reclaimer = self.reclamation.reclaimer();
         Worker {
             txn_executor: self.concurrency_control.spawn_executor(
                 &self.index,
-                epoch_guard,
+                epoch_participant,
                 reclaimer,
             ),
             log_writer: self.logger.spawn_writer(),
