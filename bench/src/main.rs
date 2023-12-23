@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{arg, Parser, ValueEnum};
-use qwerk::{ConcurrencyControl, Database, Optimistic, Pessimistic};
+use qwerk::{ConcurrencyControl, Database, DatabaseOptions, Optimistic, Pessimistic};
 use rand::{distributions::WeightedIndex, prelude::Distribution, rngs::SmallRng, Rng, SeedableRng};
 use serde::Serialize;
 use std::{
@@ -69,12 +69,12 @@ enum WorkloadKind {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.protocol {
-        Protocol::Optimistic => run_benchmark::<Optimistic>(cli),
-        Protocol::Pessimistic => run_benchmark::<Pessimistic>(cli),
+        Protocol::Optimistic => run_benchmark(cli, Optimistic::new()),
+        Protocol::Pessimistic => run_benchmark(cli, Pessimistic::new()),
     }
 }
 
-fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> Result<()> {
+fn run_benchmark<C: ConcurrencyControl>(cli: Cli, concurrency_control: C) -> Result<()> {
     let workload = match cli.workload {
         WorkloadKind::A => Workload {
             read_proportion: 50,
@@ -118,7 +118,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli) -> Result<()> {
     };
 
     let shared = Arc::new(SharedState {
-        db: Database::<C>::open("data")?,
+        db: DatabaseOptions::with_concurrency_control(concurrency_control).open("data")?,
         barrier: Barrier::new(cli.threads + 1),
         is_running: true.into(),
         latest: cli.records.into(),

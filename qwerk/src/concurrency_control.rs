@@ -14,15 +14,17 @@ use crate::{
     Index, Result, Shared,
 };
 
-pub trait ConcurrencyControl: ConcurrencyControlInternal {}
+/// The default concurrency control protocol.
+pub type DefaultProtocol = Optimistic;
 
-pub trait ConcurrencyControlInternal: Send + Sync + 'static {
+/// Concurrency control protocol.
+pub trait ConcurrencyControl: Send + Sync + Default + 'static + ConcurrencyControlInternal {}
+
+pub trait ConcurrencyControlInternal: Send + Sync + Default + 'static {
     type Record: Record;
     type Executor<'a>: TransactionExecutor + 'a
     where
         Self: 'a;
-
-    fn init() -> Self;
 
     /// Loads a log entry into `index`.
     ///

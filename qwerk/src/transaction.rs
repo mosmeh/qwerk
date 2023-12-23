@@ -1,9 +1,9 @@
 use crate::{
-    concurrency_control::TransactionExecutor, persistence::LogEntry, ConcurrencyControl, Epoch,
-    Error, Result, Worker,
+    concurrency_control::TransactionExecutor, persistence::LogEntry, ConcurrencyControl,
+    DefaultProtocol, Epoch, Error, Result, Worker,
 };
 
-pub struct Transaction<'db, 'worker, C: ConcurrencyControl> {
+pub struct Transaction<'db, 'worker, C: ConcurrencyControl = DefaultProtocol> {
     worker: &'worker mut Worker<'db, C>,
     is_active: bool,
 }

@@ -1,19 +1,21 @@
-use qwerk::{ConcurrencyControl, Database, Optimistic, Pessimistic};
+use qwerk::{ConcurrencyControl, DatabaseOptions, Optimistic, Pessimistic};
 
 #[test]
 fn pessimistic() {
-    test::<Pessimistic>();
+    test(Pessimistic::new());
 }
 
 #[test]
 fn optimistic() {
-    test::<Optimistic>();
+    test(Optimistic::new());
 }
 
-fn test<C: ConcurrencyControl>() {
+fn test<C: ConcurrencyControl>(concurrency_control: C) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("data");
-    let db: Database<C> = Database::open(path).unwrap();
+    let db = DatabaseOptions::with_concurrency_control(concurrency_control)
+        .open(path)
+        .unwrap();
 
     let mut worker = db.spawn_worker();
 
