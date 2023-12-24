@@ -1,8 +1,10 @@
-use super::{ConcurrencyControl, ConcurrencyControlInternal, Shared, TransactionExecutor};
+use super::{
+    ConcurrencyControl, ConcurrencyControlInternal, Precommit, Shared, TransactionExecutor,
+};
 use crate::{
     epoch::EpochParticipant,
     memory_reclamation::Reclaimer,
-    persistence::{LogEntry, LogWriter},
+    persistence::LogWriter,
     record,
     small_bytes::SmallBytes,
     tid::{Tid, TidGenerator},
@@ -288,12 +290,14 @@ impl TransactionExecutor for Executor<'_> {
         Ok(())
     }
 
-    fn precommit<'a>(&mut self, log_writer: &'a LogWriter<'a>) -> Result<LogEntry<'a>> {
-        let mut log_capacity_reserver = log_writer.reserver();
-        for item in &self.write_set {
-            log_capacity_reserver.reserve_write(&item.key, item.value.as_deref());
-        }
-        let reserved_log_capacity = log_capacity_reserver.finish();
+    fn precommit<'a>(&mut self, log_writer: &'a LogWriter<'a>) -> Result<Precommit<'a>> {
+        let reserved_log_capacity = (!self.write_set.is_empty()).then(|| {
+            let mut reserver = log_writer.reserver();
+            for item in &self.write_set {
+                reserver.reserve_write(&item.key, item.value.as_deref());
+            }
+            reserver.finish()
+        });
 
         // Phase 1
 
@@ -368,9 +372,11 @@ impl TransactionExecutor for Executor<'_> {
             .ok_or(Error::TooManyTransactions)?;
 
         // Phase 3: write phase
-        let mut log_entry = reserved_log_capacity.insert(commit_tid);
+        let mut log_entry = reserved_log_capacity.map(|capacity| capacity.insert(commit_tid));
         for item in self.write_set.drain(..) {
-            log_entry.write(item.key.as_ref(), item.value.as_deref());
+            if let Some(log_entry) = &mut log_entry {
+                log_entry.write(item.key.as_ref(), item.value.as_deref());
+            }
 
             let record_ptr = item
                 .target
@@ -396,7 +402,10 @@ impl TransactionExecutor for Executor<'_> {
             }
         }
 
-        Ok(log_entry)
+        Ok(Precommit {
+            epoch: commit_epoch,
+            log_entry,
+        })
     }
 
     fn abort(&mut self) {
