@@ -77,7 +77,7 @@ impl ConcurrencyControlInternal for Optimistic {
         }
     }
 
-    fn spawn_executor<'a>(
+    fn executor<'a>(
         &'a self,
         index: &'a Index<Self::Record>,
         epoch_participant: EpochParticipant<'a>,
@@ -304,7 +304,7 @@ impl TransactionExecutor for Executor<'_> {
         // The stability of the sort doesn't matter because the keys are unique.
         self.write_set.sort_unstable_by(|a, b| a.key.cmp(&b.key));
 
-        let mut tid_set = self.tid_generator.begin_transaction();
+        let mut tid_set = self.tid_generator.transaction();
         for item in &mut self.write_set {
             let (record_ptr, was_vacant) = match self.index.entry(item.key.clone()) {
                 Entry::Occupied(entry) => (*entry.get(), false),

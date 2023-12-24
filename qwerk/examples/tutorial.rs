@@ -13,7 +13,7 @@ fn main() -> Result<()> {
     // workloads.
 
     // You need to spawn workers to execute transactions.
-    let mut worker = db.spawn_worker();
+    let mut worker = db.worker();
 
     // All the operations (insert, remove, get, and commit) can fail due to
     // conflicts with other concurrent transactions.
@@ -22,12 +22,12 @@ fn main() -> Result<()> {
     // In this example, the operations can't fail because there are no other
     // concurrent transactions.
 
-    let mut txn = worker.begin_transaction();
+    let mut txn = worker.transaction();
     assert!(txn.get(b"key1")?.is_none());
     txn.insert(b"key1", b"foo")?;
     txn.commit()?;
 
-    let mut txn = worker.begin_transaction();
+    let mut txn = worker.transaction();
     assert_eq!(txn.get(b"key1")?, Some(b"foo".as_slice()));
     txn.remove(b"key1")?;
     txn.commit()?;
@@ -35,7 +35,7 @@ fn main() -> Result<()> {
     // You can also abort a transaction.
     // When a transaction is aborted, all the changes made in the transaction
     // are rolled back.
-    let mut txn = worker.begin_transaction();
+    let mut txn = worker.transaction();
     txn.insert(b"key1", b"foo")?;
     txn.insert(b"key2", b"bar")?;
     txn.abort();
@@ -45,12 +45,12 @@ fn main() -> Result<()> {
     // durability. In this way, writes to the disk can be batched and
     // the performance is improved.
 
-    let mut txn = worker.begin_transaction();
+    let mut txn = worker.transaction();
     assert!(txn.get(b"key1")?.is_none());
     txn.insert(b"key3", b"baz")?;
     let commit_epoch1 = txn.precommit()?;
 
-    let mut txn = worker.begin_transaction();
+    let mut txn = worker.transaction();
     assert_eq!(txn.get(b"key3")?, Some(b"baz".as_slice()));
     txn.insert(b"key4", b"qux")?;
     let commit_epoch2 = txn.precommit()?;
