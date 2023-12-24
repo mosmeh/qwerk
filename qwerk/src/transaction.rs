@@ -1,6 +1,6 @@
 use crate::{
-    concurrency_control::TransactionExecutor, persistence::LogEntry, ConcurrencyControl,
-    DefaultProtocol, Epoch, Error, Result, Worker,
+    concurrency_control::{Precommit, TransactionExecutor},
+    ConcurrencyControl, DefaultProtocol, Epoch, Error, Result, Worker,
 };
 
 pub struct Transaction<'db, 'worker, C: ConcurrencyControl = DefaultProtocol> {
@@ -79,7 +79,8 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
         result
     }
 
-    /// Commits the transaction and waits until the commit is durable.
+    /// Commits the transaction, and waits until the commit is durable if
+    /// the transaction contains any writes.
     ///
     /// Even if the transaction consists only of [`get`]s, the transaction
     /// must be committed and must succeed.
@@ -92,10 +93,13 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
     /// [`get`]: #method.get
     pub fn commit(mut self) -> Result<Epoch> {
         let persistent_epoch = self.worker.persistent_epoch;
-        let log_entry = self.do_precommit()?;
-        let commit_epoch = log_entry.epoch();
-        log_entry.flush()?; // Even if this fails, we can no longer abort the transaction.
-        persistent_epoch.wait_for(commit_epoch);
+        let precommit = self.do_precommit()?;
+        let commit_epoch = precommit.epoch();
+        // Even if the flush fails, we are already past the point of no return,
+        // so we can't abort the transaction.
+        if precommit.flush_log_entry()? {
+            persistent_epoch.wait_for(commit_epoch);
+        }
         Ok(commit_epoch)
     }
 
@@ -113,17 +117,17 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
         Ok(self.do_precommit()?.epoch())
     }
 
-    fn do_precommit(&mut self) -> Result<LogEntry> {
+    fn do_precommit(&mut self) -> Result<Precommit> {
         if !self.is_active {
             return Err(Error::TransactionAlreadyAborted);
         }
-        let log_entry = self
+        let precommit = self
             .worker
             .txn_executor
             .precommit(&self.worker.log_writer)?; // `do_abort` is called in `drop` on `Err`
         self.worker.txn_executor.end_transaction();
         self.is_active = false;
-        Ok(log_entry)
+        Ok(precommit)
     }
 
     /// Aborts the transaction.

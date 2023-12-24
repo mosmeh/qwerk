@@ -1,9 +1,9 @@
-use super::{ConcurrencyControl, ConcurrencyControlInternal, TransactionExecutor};
+use super::{ConcurrencyControl, ConcurrencyControlInternal, Precommit, TransactionExecutor};
 use crate::{
     epoch::EpochParticipant,
     lock::Lock,
     memory_reclamation::Reclaimer,
-    persistence::{LogEntry, LogWriter},
+    persistence::LogWriter,
     record,
     small_bytes::SmallBytes,
     tid::{Tid, TidGenerator},
@@ -257,28 +257,38 @@ impl TransactionExecutor for Executor<'_> {
         Ok(())
     }
 
-    fn precommit<'a>(&mut self, log_writer: &'a LogWriter<'a>) -> Result<LogEntry<'a>> {
+    fn precommit<'a>(&mut self, log_writer: &'a LogWriter<'a>) -> Result<Precommit<'a>> {
         let mut tid_set = self.tid_generator.begin_transaction();
-        let mut log_capacity_reserver = log_writer.reserver();
+        let mut has_write = false;
         for item in &self.rw_set {
             let record = unsafe { item.record_ptr.as_ref() };
             tid_set.add(record.tid.get());
             if let ItemKind::Write { .. } = item.kind {
-                log_capacity_reserver.reserve_write(&item.key, unsafe { record.get() });
+                has_write = true;
             }
         }
-        let reserved_log_capacity = log_capacity_reserver.finish();
+
+        let reserved_log_capacity = has_write.then(|| {
+            let mut reserver = log_writer.reserver();
+            for item in &self.rw_set {
+                if let ItemKind::Write { .. } = item.kind {
+                    let record = unsafe { item.record_ptr.as_ref() };
+                    reserver.reserve_write(&item.key, unsafe { record.get() });
+                }
+            }
+            reserver.finish()
+        });
 
         let commit_epoch = self.epoch_participant.force_refresh();
         let commit_tid = tid_set
             .generate_tid(commit_epoch)
             .ok_or(Error::TooManyTransactions)?;
 
-        let mut log_entry = reserved_log_capacity.insert(commit_tid);
+        let mut log_entry = reserved_log_capacity.map(|capacity| capacity.insert(commit_tid));
         for item in self.rw_set.drain(..) {
             let record = unsafe { item.record_ptr.as_ref() };
             let value = unsafe { record.get() };
-            if let ItemKind::Write { .. } = &item.kind {
+            if let (Some(log_entry), ItemKind::Write { .. }) = (&mut log_entry, &item.kind) {
                 log_entry.write(&item.key, value);
             }
             match item.kind {
@@ -304,7 +314,10 @@ impl TransactionExecutor for Executor<'_> {
                 }
             }
         }
-        Ok(log_entry)
+        Ok(Precommit {
+            log_entry,
+            epoch: commit_epoch,
+        })
     }
 
     fn abort(&mut self) {

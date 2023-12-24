@@ -400,7 +400,6 @@ impl<'a> ReservedCapacity<'a> {
         LogEntry {
             writer: self.writer,
             buf: self.buf,
-            epoch,
             num_records_offset,
             num_records: 0,
         }
@@ -410,7 +409,6 @@ impl<'a> ReservedCapacity<'a> {
 pub struct LogEntry<'a> {
     writer: &'a LogWriter<'a>,
     buf: MappedMutexGuard<'a, Option<LogBuf>>,
-    epoch: Epoch,
     num_records_offset: usize,
     num_records: u64,
 }
@@ -422,10 +420,6 @@ impl LogEntry<'_> {
         bytes.write_bytes(key);
         bytes.write_maybe_bytes(value);
         self.num_records += 1;
-    }
-
-    pub const fn epoch(&self) -> Epoch {
-        self.epoch
     }
 
     /// Finishes writing the log entry, and persists it to the disk.
