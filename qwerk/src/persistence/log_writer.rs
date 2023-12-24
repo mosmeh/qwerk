@@ -95,7 +95,7 @@ impl Logger {
         })
     }
 
-    pub fn spawn_writer(&self) -> LogWriter {
+    pub fn writer(&self) -> LogWriter {
         LogWriter {
             logger: self,
             channel: self

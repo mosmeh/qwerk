@@ -43,7 +43,7 @@ pub trait ConcurrencyControlInternal: Send + Sync + Default + 'static {
         tid: Tid,
     );
 
-    fn spawn_executor<'a>(
+    fn executor<'a>(
         &'a self,
         index: &'a Index<Self::Record>,
         epoch_participant: EpochParticipant<'a>,

@@ -71,7 +71,7 @@ impl ConcurrencyControlInternal for Pessimistic {
         }
     }
 
-    fn spawn_executor<'a>(
+    fn executor<'a>(
         &'a self,
         index: &'a Index<Self::Record>,
         epoch_participant: EpochParticipant<'a>,
@@ -258,7 +258,7 @@ impl TransactionExecutor for Executor<'_> {
     }
 
     fn precommit<'a>(&mut self, log_writer: &'a LogWriter<'a>) -> Result<Precommit<'a>> {
-        let mut tid_set = self.tid_generator.begin_transaction();
+        let mut tid_set = self.tid_generator.transaction();
         let mut has_write = false;
         for item in &self.rw_set {
             let record = unsafe { item.record_ptr.as_ref() };

@@ -82,7 +82,7 @@ impl Default for TidGenerator {
 }
 
 impl TidGenerator {
-    pub fn begin_transaction(&mut self) -> TidSet {
+    pub fn transaction(&mut self) -> TidSet {
         // (b) larger than the worker’s most recently chosen TID
         let max_tid = self.last_tid;
         TidSet {

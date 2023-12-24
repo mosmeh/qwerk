@@ -17,9 +17,9 @@ fn test<C: ConcurrencyControl>(concurrency_control: C) {
         .open(path)
         .unwrap();
 
-    let mut worker = db.spawn_worker();
+    let mut worker = db.worker();
 
-    let mut txn = worker.begin_transaction();
+    let mut txn = worker.transaction();
     assert!(txn.get(b"alice").unwrap().is_none());
     txn.insert(b"alice", b"foo").unwrap();
     assert_eq!(txn.get(b"alice").unwrap(), Some(b"foo".as_slice()));
@@ -29,29 +29,29 @@ fn test<C: ConcurrencyControl>(concurrency_control: C) {
     assert!(txn.get(b"carol").unwrap().is_none());
     txn.commit().unwrap();
 
-    let mut txn = worker.begin_transaction();
+    let mut txn = worker.transaction();
     assert_eq!(txn.get(b"alice").unwrap(), Some(b"foo".as_slice()));
     assert_eq!(txn.get(b"bob").unwrap(), Some(b"bar".as_slice()));
     assert!(txn.get(b"carol").unwrap().is_none());
     txn.commit().unwrap();
 
-    let mut txn = worker.begin_transaction();
+    let mut txn = worker.transaction();
     txn.insert(b"alice", b"foobar").unwrap();
     txn.remove(b"bob").unwrap();
     txn.abort();
 
-    let mut txn = worker.begin_transaction();
+    let mut txn = worker.transaction();
     txn.remove(b"alice").unwrap();
     drop(txn); // abort
 
-    let mut txn = worker.begin_transaction();
+    let mut txn = worker.transaction();
     assert_eq!(txn.get(b"alice").unwrap(), Some(b"foo".as_slice()));
     assert_eq!(txn.get(b"bob").unwrap(), Some(b"bar".as_slice()));
     txn.insert(b"alice", b"qux").unwrap();
     txn.remove(b"bob").unwrap();
     let commit_epoch1 = txn.precommit().unwrap();
 
-    let mut txn = worker.begin_transaction();
+    let mut txn = worker.transaction();
     assert_eq!(txn.get(b"alice").unwrap(), Some(b"qux".as_slice()));
     assert!(txn.get(b"bob").unwrap().is_none());
     txn.insert(b"carol", b"quux").unwrap();
