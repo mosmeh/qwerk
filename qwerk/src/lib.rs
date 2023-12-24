@@ -211,16 +211,16 @@ impl<C: ConcurrencyControl> Database<C> {
     ///
     /// You usually should spawn one [`Worker`] per thread, and reuse the
     /// [`Worker`] for multiple transactions.
-    pub fn spawn_worker(&self) -> Worker<C> {
+    pub fn worker(&self) -> Worker<C> {
         let epoch_participant = self.epoch_fw.participant();
         let reclaimer = self.reclamation.reclaimer();
         Worker {
-            txn_executor: self.concurrency_control.spawn_executor(
+            txn_executor: self.concurrency_control.executor(
                 &self.index,
                 epoch_participant,
                 reclaimer,
             ),
-            log_writer: self.logger.spawn_writer(),
+            log_writer: self.logger.writer(),
             persistent_epoch: &self.persistent_epoch,
         }
     }
@@ -264,7 +264,7 @@ impl<'db, C: ConcurrencyControl> Worker<'db, C> {
     /// Begins a new transaction.
     ///
     /// A [`Worker`] can only have one active transaction at a time.
-    pub fn begin_transaction<'worker>(&'worker mut self) -> Transaction<'db, 'worker, C> {
+    pub fn transaction<'worker>(&'worker mut self) -> Transaction<'db, 'worker, C> {
         // Rather than instantiating a TransactionExecutor every time
         // a transaction begins, the single instance is reused so that buffers
         // allocated by TransactionExecutor can be reused.

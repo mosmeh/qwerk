@@ -213,7 +213,7 @@ fn run_worker<C: ConcurrencyControl>(
     shared: &SharedState<C>,
     worker_index: usize,
 ) -> Statistics {
-    let mut worker = shared.db.spawn_worker();
+    let mut worker = shared.db.worker();
     let mut rng = match cli.seed {
         Some(seed) => SmallRng::seed_from_u64(seed ^ worker_index as u64),
         None => SmallRng::from_entropy(),
@@ -234,7 +234,7 @@ fn run_worker<C: ConcurrencyControl>(
     let to = cli.records * (worker_index as u64 + 1) / cli.threads as u64;
     for i in from..to {
         let key = i.to_ne_bytes();
-        let mut txn = worker.begin_transaction();
+        let mut txn = worker.transaction();
         txn.insert(key, &payload).unwrap();
         txn.precommit().unwrap();
     }
@@ -243,7 +243,7 @@ fn run_worker<C: ConcurrencyControl>(
     shared.barrier.wait(); // Signal that the benchmark will start
     while shared.is_running.load(Ordering::SeqCst) {
         let op = OPERATIONS[op_dist.sample(&mut rng)];
-        let mut txn = worker.begin_transaction();
+        let mut txn = worker.transaction();
         for _ in 0..cli.working_set {
             let i = if op == Operation::Insert {
                 generator.insert()
