@@ -11,7 +11,7 @@ use crate::{
     record::Record,
     small_bytes::SmallBytes,
     tid::Tid,
-    Index, Result, Shared,
+    Epoch, Index, Result, Shared,
 };
 
 /// The default concurrency control protocol.
@@ -75,13 +75,38 @@ pub trait TransactionExecutor {
     /// Implementations should write modified records to `log_writer`
     /// if the commit succeeds.
     ///
-    /// On success, returns a log entry that contains the modifications
-    /// made in the transaction.
-    fn precommit<'a>(&mut self, log_writer: &'a LogWriter<'a>) -> Result<LogEntry<'a>>;
+    /// On success, returns a precommit object.
+    fn precommit<'a>(&mut self, log_writer: &'a LogWriter<'a>) -> Result<Precommit<'a>>;
 
     /// Aborts the transaction.
     ///
     /// Called when a user requests an abort, or when `Err` is returned from
     /// `read`, `write`, or `precommit`.
     fn abort(&mut self);
+}
+
+pub struct Precommit<'a> {
+    /// The epoch the transaction belongs to.
+    epoch: Epoch,
+
+    /// The log entry that contains the modifications made by the transaction.
+    /// `None` if the transaction was read-only.
+    log_entry: Option<LogEntry<'a>>,
+}
+
+impl Precommit<'_> {
+    pub fn epoch(&self) -> Epoch {
+        self.epoch
+    }
+
+    /// Flushes a log entry to the disk, if any.
+    ///
+    /// Returns `true` if a log entry was flushed.
+    pub fn flush_log_entry(mut self) -> std::io::Result<bool> {
+        let Some(log_entry) = self.log_entry.take() else {
+            return Ok(false);
+        };
+        log_entry.flush()?;
+        Ok(true)
+    }
 }
