@@ -5,7 +5,9 @@ use rand::{distributions::WeightedIndex, prelude::Distribution, rngs::SmallRng, 
 use serde::Serialize;
 use std::{
     io::Write,
+    num::NonZeroUsize,
     ops::AddAssign,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Barrier,
@@ -19,8 +21,14 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[derive(Debug, Clone, Parser, Serialize)]
 struct Cli {
+    #[arg(long)]
+    path: Option<PathBuf>,
+
     #[arg(long, default_value_t = 8)]
     threads: usize,
+
+    #[arg(long, default_value = "4")]
+    background_threads: NonZeroUsize,
 
     #[arg(long, default_value_t = 100000)]
     records: u64,
@@ -117,8 +125,13 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli, concurrency_control: C) -> Res
         }
     };
 
+    let options = DatabaseOptions::with_concurrency_control(concurrency_control)
+        .background_threads(cli.background_threads);
     let shared = Arc::new(SharedState {
-        db: DatabaseOptions::with_concurrency_control(concurrency_control).open("data")?,
+        db: match &cli.path {
+            Some(path) => options.open(path)?,
+            None => options.open_temporary(),
+        },
         barrier: Barrier::new(cli.threads + 1),
         is_running: true.into(),
         latest: cli.records.into(),

@@ -11,11 +11,7 @@ fn optimistic() {
 }
 
 fn test<C: ConcurrencyControl>(concurrency_control: C) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("data");
-    let db = DatabaseOptions::with_concurrency_control(concurrency_control)
-        .open(path)
-        .unwrap();
+    let db = DatabaseOptions::with_concurrency_control(concurrency_control).open_temporary();
 
     let mut worker = db.worker();
 
@@ -58,8 +54,4 @@ fn test<C: ConcurrencyControl>(concurrency_control: C) {
     let commit_epoch2 = txn.precommit().unwrap();
 
     assert!(commit_epoch1 <= commit_epoch2);
-
-    let durable_epoch = db.flush().unwrap();
-    assert!(durable_epoch >= commit_epoch2);
-    assert!(db.durable_epoch() >= durable_epoch);
 }

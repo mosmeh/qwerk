@@ -73,10 +73,11 @@ pub trait TransactionExecutor {
     /// Attempts to commit the transaction.
     ///
     /// Implementations should write modified records to `log_writer`
-    /// if the commit succeeds.
+    /// if the commit succeeds. `log_writer` is `None` if the persistence is
+    /// disabled.
     ///
     /// On success, returns a precommit object.
-    fn precommit<'a>(&mut self, log_writer: &'a LogWriter<'a>) -> Result<Precommit<'a>>;
+    fn precommit<'a>(&mut self, log_writer: Option<&'a LogWriter<'a>>) -> Result<Precommit<'a>>;
 
     /// Aborts the transaction.
     ///
@@ -90,7 +91,7 @@ pub struct Precommit<'a> {
     epoch: Epoch,
 
     /// The log entry that contains the modifications made by the transaction.
-    /// `None` if the transaction was read-only.
+    /// `None` if the transaction was read-only or the persistence is disabled.
     log_entry: Option<LogEntry<'a>>,
 }
 
