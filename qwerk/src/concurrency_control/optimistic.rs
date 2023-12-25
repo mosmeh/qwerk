@@ -290,14 +290,17 @@ impl TransactionExecutor for Executor<'_> {
         Ok(())
     }
 
-    fn precommit<'a>(&mut self, log_writer: &'a LogWriter<'a>) -> Result<Precommit<'a>> {
-        let reserved_log_capacity = (!self.write_set.is_empty()).then(|| {
-            let mut reserver = log_writer.reserver();
-            for item in &self.write_set {
-                reserver.reserve_write(&item.key, item.value.as_deref());
+    fn precommit<'a>(&mut self, log_writer: Option<&'a LogWriter<'a>>) -> Result<Precommit<'a>> {
+        let reserved_log_capacity = match log_writer {
+            Some(writer) if !self.write_set.is_empty() => {
+                let mut reserver = writer.reserver();
+                for item in &self.write_set {
+                    reserver.reserve_write(&item.key, item.value.as_deref());
+                }
+                Some(reserver.finish())
             }
-            reserver.finish()
-        });
+            _ => None,
+        };
 
         // Phase 1
 

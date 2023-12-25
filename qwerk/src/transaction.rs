@@ -1,5 +1,6 @@
 use crate::{
     concurrency_control::{Precommit, TransactionExecutor},
+    persistence::PersistenceHandle,
     ConcurrencyControl, DefaultProtocol, Epoch, Error, Result, Worker,
 };
 
@@ -92,7 +93,10 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
     ///
     /// [`get`]: #method.get
     pub fn commit(mut self) -> Result<Epoch> {
-        let persistent_epoch = self.worker.persistent_epoch;
+        let Some(persistence) = &self.worker.persistence else {
+            return self.precommit();
+        };
+        let persistent_epoch = persistence.persistent_epoch();
         let precommit = self.do_precommit()?;
         let commit_epoch = precommit.epoch();
         // Even if the flush fails, we are already past the point of no return,
@@ -121,10 +125,12 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
         if !self.is_active {
             return Err(Error::TransactionAlreadyAborted);
         }
-        let precommit = self
+        let log_writer = self
             .worker
-            .txn_executor
-            .precommit(&self.worker.log_writer)?; // `do_abort` is called in `drop` on `Err`
+            .persistence
+            .as_ref()
+            .map(PersistenceHandle::log_writer);
+        let precommit = self.worker.txn_executor.precommit(log_writer)?; // `do_abort` is called in `drop` on `Err`
         self.worker.txn_executor.end_transaction();
         self.is_active = false;
         Ok(precommit)
