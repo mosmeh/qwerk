@@ -20,7 +20,7 @@ use concurrency_control::TransactionExecutor;
 use epoch::EpochFramework;
 use file_lock::FileLock;
 use memory_reclamation::MemoryReclamation;
-use persistence::{LogWriter, Logger, LoggerConfig, PersistentEpoch};
+use persistence::{LoggerConfig, Persistence, PersistenceHandle, PersistentEpoch};
 use scc::HashIndex;
 use shared::Shared;
 use small_bytes::SmallBytes;
@@ -59,7 +59,7 @@ pub struct DatabaseOptions<C: ConcurrencyControl = DefaultProtocol> {
     background_threads: NonZeroUsize,
     epoch_duration: Duration,
     gc_threshold: usize,
-    log_buffer_size_bytes: usize,
+    log_buffer_size: usize,
     log_buffers_per_worker: NonZeroUsize,
 }
 
@@ -73,7 +73,7 @@ impl<C: ConcurrencyControl> Default for DatabaseOptions<C> {
                 .unwrap(),
             epoch_duration: Duration::from_millis(40), // Default in the Silo paper (Tu et al. 2013).
             gc_threshold: 4096,
-            log_buffer_size_bytes: 1024 * 1024,
+            log_buffer_size: 1024 * 1024,
             log_buffers_per_worker: 8.try_into().unwrap(),
         }
     }
@@ -108,37 +108,54 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
             Err(e) => return Err(e.into()),
         }
         let dir = dir.canonicalize()?;
-        let file_lock =
+        let lock =
             FileLock::try_lock_exclusive(dir.join("lock"))?.ok_or(Error::DatabaseAlreadyOpen)?;
 
-        let persistent_epoch = PersistentEpoch::new(&dir)?;
+        let persistent_epoch = Arc::new(PersistentEpoch::new(&dir)?);
         let durable_epoch = persistent_epoch.get();
-        let index = persistence::recover::<C>(&dir, durable_epoch, self.background_threads)?;
-
+        let index = Arc::new(persistence::recover::<C>(
+            &dir,
+            durable_epoch,
+            self.background_threads,
+        )?);
         let epoch_fw = Arc::new(EpochFramework::new(
             durable_epoch.increment(),
             self.epoch_duration,
         ));
 
-        let persistent_epoch = Arc::new(persistent_epoch);
-        let logger = Logger::new(LoggerConfig {
-            dir,
-            epoch_fw: epoch_fw.clone(),
-            persistent_epoch: persistent_epoch.clone(),
-            flushing_threads: self.background_threads,
-            preallocated_buffer_size: self.log_buffer_size_bytes,
-            buffers_per_writer: self.log_buffers_per_worker,
-        })?;
+        let reclamation = Arc::new(MemoryReclamation::new(self.gc_threshold));
+
+        let persistence = Persistence::new(
+            lock,
+            persistent_epoch.clone(),
+            LoggerConfig {
+                dir,
+                epoch_fw: epoch_fw.clone(),
+                persistent_epoch,
+                flushing_threads: self.background_threads,
+                preallocated_buffer_size: self.log_buffer_size,
+                buffers_per_writer: self.log_buffers_per_worker,
+            },
+        )?;
 
         Ok(Database {
             index,
             concurrency_control: self.concurrency_control,
             epoch_fw,
-            reclamation: MemoryReclamation::new(self.gc_threshold),
-            logger,
-            persistent_epoch,
-            _file_lock: file_lock,
+            reclamation,
+            persistence: Some(persistence),
         })
+    }
+
+    /// Opens a temporary database that is not persisted to the disk.
+    pub fn open_temporary(self) -> Database<C> {
+        Database {
+            index: Default::default(),
+            concurrency_control: self.concurrency_control,
+            epoch_fw: EpochFramework::new(Epoch(0), self.epoch_duration).into(),
+            reclamation: MemoryReclamation::new(self.gc_threshold).into(),
+            persistence: None,
+        }
     }
 
     /// The number of background threads used for logging and recovery.
@@ -169,7 +186,7 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
     /// threads in chunks of this size. Defaults to 1 MiB.
     #[must_use]
     pub fn log_buffer_size(mut self, bytes: usize) -> Self {
-        self.log_buffer_size_bytes = bytes;
+        self.log_buffer_size = bytes;
         self
     }
 
@@ -190,19 +207,22 @@ mod record {
 }
 
 pub struct Database<C: ConcurrencyControl = DefaultProtocol> {
-    index: Index<C::Record>,
+    index: Arc<Index<C::Record>>,
     concurrency_control: C,
     epoch_fw: Arc<EpochFramework>,
-    reclamation: MemoryReclamation,
-    logger: Logger,
-    persistent_epoch: Arc<PersistentEpoch>,
-    _file_lock: FileLock,
+    reclamation: Arc<MemoryReclamation>,
+    persistence: Option<Persistence>,
 }
 
 impl Database<DefaultProtocol> {
     /// Opens a database at the given path, creating it if it does not exist.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         DatabaseOptions::new().open(path)
+    }
+
+    /// Opens a temporary database that is not persisted to the disk.
+    pub fn open_temporary() -> Self {
+        DatabaseOptions::new().open_temporary()
     }
 }
 
@@ -220,8 +240,7 @@ impl<C: ConcurrencyControl> Database<C> {
                 epoch_participant,
                 reclaimer,
             ),
-            log_writer: self.logger.writer(),
-            persistent_epoch: &self.persistent_epoch,
+            persistence: self.persistence.as_ref().map(Persistence::handle),
         }
     }
 
@@ -229,21 +248,32 @@ impl<C: ConcurrencyControl> Database<C> {
     ///
     /// The durable epoch is the epoch up to which all changes made by
     /// committed transactions are guaranteed to be durable.
+    ///
+    /// Always returns `Epoch(0)` if the database is temporary.
     pub fn durable_epoch(&self) -> Epoch {
-        self.persistent_epoch.get()
+        self.persistence
+            .as_ref()
+            .map_or(Epoch(0), Persistence::durable_epoch)
     }
 
     /// Makes sure the changes made by all committed transactions are persisted
     /// to the disk.
     ///
+    /// This operation is a no-op if the database is temporary.
+    ///
     /// Returns the durable epoch after the flush.
     pub fn flush(&self) -> std::io::Result<Epoch> {
-        self.logger.flush()
+        Ok(match &self.persistence {
+            Some(p) => p.flush()?,
+            None => Epoch(0),
+        })
     }
 }
 
 impl<C: ConcurrencyControl> Drop for Database<C> {
     fn drop(&mut self) {
+        self.persistence.take();
+
         let guard = scc::ebr::Guard::new();
         for (_, record_ptr) in self.index.iter(&guard) {
             unsafe { record_ptr.drop_in_place() };
@@ -253,8 +283,7 @@ impl<C: ConcurrencyControl> Drop for Database<C> {
 
 pub struct Worker<'a, C: ConcurrencyControl + 'a = DefaultProtocol> {
     txn_executor: C::Executor<'a>,
-    log_writer: LogWriter<'a>,
-    persistent_epoch: &'a PersistentEpoch,
+    persistence: Option<PersistenceHandle<'a>>,
 }
 
 static_assertions::assert_not_impl_any!(Worker<'_, Pessimistic>: Send, Sync);

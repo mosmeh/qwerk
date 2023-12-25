@@ -257,7 +257,7 @@ impl TransactionExecutor for Executor<'_> {
         Ok(())
     }
 
-    fn precommit<'a>(&mut self, log_writer: &'a LogWriter<'a>) -> Result<Precommit<'a>> {
+    fn precommit<'a>(&mut self, log_writer: Option<&'a LogWriter<'a>>) -> Result<Precommit<'a>> {
         let mut tid_set = self.tid_generator.transaction();
         let mut has_write = false;
         for item in &self.rw_set {
@@ -268,16 +268,19 @@ impl TransactionExecutor for Executor<'_> {
             }
         }
 
-        let reserved_log_capacity = has_write.then(|| {
-            let mut reserver = log_writer.reserver();
-            for item in &self.rw_set {
-                if let ItemKind::Write { .. } = item.kind {
-                    let record = unsafe { item.record_ptr.as_ref() };
-                    reserver.reserve_write(&item.key, unsafe { record.get() });
+        let reserved_log_capacity = match log_writer {
+            Some(writer) if has_write => {
+                let mut reserver = writer.reserver();
+                for item in &self.rw_set {
+                    if let ItemKind::Write { .. } = item.kind {
+                        let record = unsafe { item.record_ptr.as_ref() };
+                        reserver.reserve_write(&item.key, unsafe { record.get() });
+                    }
                 }
+                Some(reserver.finish())
             }
-            reserver.finish()
-        });
+            _ => None,
+        };
 
         let commit_epoch = self.epoch_participant.force_refresh();
         let commit_tid = tid_set
