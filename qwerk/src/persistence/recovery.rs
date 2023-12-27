@@ -1,5 +1,10 @@
 use super::log_reader::LogReader;
-use crate::{record::Record, ConcurrencyControl, Epoch, Index, Result};
+use crate::{
+    memory_reclamation::MemoryReclamation,
+    persistence::checkpoint::{checkpoint, CheckpointReader},
+    record::Record,
+    ConcurrencyControl, Epoch, Index, Result,
+};
 use crossbeam_queue::SegQueue;
 use std::{
     num::NonZeroUsize,
@@ -12,22 +17,41 @@ pub fn recover<C: ConcurrencyControl>(
     durable_epoch: Epoch,
     num_threads: NonZeroUsize,
 ) -> Result<Index<C::Record>> {
+    // Make sure we can open the directory.
+    let dir_entries = std::fs::read_dir(dir)?;
+
+    // Load the checkpoint.
+    let index = match CheckpointReader::new(dir) {
+        Ok(reader) => {
+            let index = Index::new();
+            for entry in reader {
+                let entry = entry?;
+                C::load_record(&index, entry.key, Some(entry.value), entry.tid);
+            }
+            index
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Index::new(),
+        Err(e) => return Err(e.into()),
+    };
+
+    // Load the logs.
     let queue = SegQueue::new();
-    for dir_entry in std::fs::read_dir(dir)? {
+    for dir_entry in dir_entries {
         let path = dir_entry?.path();
         if super::is_log_file(&path) {
             queue.push(path);
         }
     }
     if queue.is_empty() {
-        return Ok(Default::default());
+        // We are in one of the following cases:
+        // - The database is empty.
+        // - The database has a checkpoint but no logs.
+        // In both cases, we don't have to create a new checkpoint file.
+        return Ok(index);
     }
 
     let num_threads = num_threads.get().min(queue.len());
-    let shared = Arc::new(SharedState {
-        index: Default::default(),
-        queue,
-    });
+    let shared = Arc::new(SharedState { index, queue });
 
     let threads: Vec<_> = (0..num_threads)
         .map(|_| {
@@ -50,7 +74,14 @@ pub fn recover<C: ConcurrencyControl>(
         !is_tombstone
     });
 
-    // TODO: replace log files with checkpoints. For now, just delete the log files.
+    // Write a new, consistent checkpoint and remove all the logs.
+
+    // We don't have any concurrent accesses to the index, so we can use a dummy
+    // reclaimer.
+    let reclamation = MemoryReclamation::new(usize::MAX);
+    let mut reclaimer = reclamation.reclaimer();
+    checkpoint::<C>(dir, &index, &mut reclaimer)?;
+
     for dir_entry in std::fs::read_dir(dir)? {
         let path = dir_entry?.path();
         if super::is_log_file(&path) {
@@ -78,7 +109,7 @@ fn run_log_replayer<C: ConcurrencyControl>(
                 continue;
             }
             for entry in txn.entries {
-                C::load_log_entry(&shared.index, entry.key, entry.value, txn.tid);
+                C::load_record(&shared.index, entry.key, entry.value, txn.tid);
             }
         }
     }

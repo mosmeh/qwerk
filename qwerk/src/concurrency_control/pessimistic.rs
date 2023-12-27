@@ -39,7 +39,7 @@ impl ConcurrencyControlInternal for Pessimistic {
     type Record = Record;
     type Executor<'a> = Executor<'a>;
 
-    fn load_log_entry(
+    fn load_record(
         index: &Index<Self::Record>,
         key: SmallBytes,
         value: Option<Box<[u8]>>,
@@ -114,6 +114,15 @@ impl Record {
 }
 
 impl record::Record for Record {
+    fn peek<F, T>(&self, f: F) -> Option<T>
+    where
+        F: FnOnce(&[u8], Tid) -> T,
+    {
+        self.lock
+            .read()
+            .and_then(|_guard| unsafe { self.get() }.map(|value| f(value, self.tid.get())))
+    }
+
     fn is_tombstone(&self) -> bool {
         self.lock
             .read()
