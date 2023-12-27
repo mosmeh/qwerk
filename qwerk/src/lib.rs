@@ -20,7 +20,9 @@ use concurrency_control::TransactionExecutor;
 use epoch::EpochFramework;
 use file_lock::FileLock;
 use memory_reclamation::MemoryReclamation;
-use persistence::{LoggerConfig, Persistence, PersistenceHandle, PersistentEpoch};
+use persistence::{
+    CheckpointerConfig, LoggerConfig, Persistence, PersistenceHandle, PersistentEpoch,
+};
 use scc::HashIndex;
 use shared::Shared;
 use small_bytes::SmallBytes;
@@ -59,6 +61,7 @@ pub struct DatabaseOptions<C: ConcurrencyControl = DefaultProtocol> {
     background_threads: NonZeroUsize,
     epoch_duration: Duration,
     gc_threshold: usize,
+    checkpoint_interval: Duration,
     log_buffer_size: usize,
     log_buffers_per_worker: NonZeroUsize,
 }
@@ -73,6 +76,7 @@ impl<C: ConcurrencyControl> Default for DatabaseOptions<C> {
                 .unwrap(),
             epoch_duration: Duration::from_millis(40), // Default in the Silo paper (Tu et al. 2013).
             gc_threshold: 4096,
+            checkpoint_interval: Duration::from_secs(30),
             log_buffer_size: 1024 * 1024,
             log_buffers_per_worker: 8.try_into().unwrap(),
         }
@@ -129,12 +133,18 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
             lock,
             persistent_epoch.clone(),
             LoggerConfig {
-                dir,
+                dir: dir.clone(),
                 epoch_fw: epoch_fw.clone(),
                 persistent_epoch,
                 flushing_threads: self.background_threads,
                 preallocated_buffer_size: self.log_buffer_size,
                 buffers_per_writer: self.log_buffers_per_worker,
+            },
+            CheckpointerConfig::<C> {
+                dir,
+                index: index.clone(),
+                reclamation: reclamation.clone(),
+                interval: self.checkpoint_interval,
             },
         )?;
 
@@ -182,6 +192,13 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
         self
     }
 
+    /// The interval between checkpoints. Defaults to 30 seconds.
+    #[must_use]
+    pub fn checkpoint_interval(mut self, interval: Duration) -> Self {
+        self.checkpoint_interval = interval;
+        self
+    }
+
     /// The size of a log buffer in bytes. Workers pass logs to log flushing
     /// threads in chunks of this size. Defaults to 1 MiB.
     #[must_use]
@@ -201,7 +218,19 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
 type Index<T> = HashIndex<SmallBytes, Shared<T>>;
 
 mod record {
+    use crate::tid::Tid;
+
     pub trait Record: Send + Sync + 'static {
+        /// Peeks at the value of the record if the record is not a tombstone.
+        ///
+        /// Returns the result of `f` was called.
+        fn peek<F, T>(&self, f: F) -> Option<T>
+        where
+            F: FnOnce(&[u8], Tid) -> T;
+
+        /// Returns `true` if the record is a tombstone.
+        ///
+        /// A tombstone is a record that is considered to be deleted.
         fn is_tombstone(&self) -> bool;
     }
 }

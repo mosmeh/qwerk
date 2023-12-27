@@ -39,6 +39,9 @@ struct Cli {
     #[arg(long, default_value_t = 2000)]
     duration: u64,
 
+    #[arg(long, default_value_t = 30000)]
+    checkpoint_interval: u64,
+
     #[arg(long, default_value_t = 4)]
     working_set: usize,
 
@@ -126,7 +129,8 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli, concurrency_control: C) -> Res
     };
 
     let options = DatabaseOptions::with_concurrency_control(concurrency_control)
-        .background_threads(cli.background_threads);
+        .background_threads(cli.background_threads)
+        .checkpoint_interval(Duration::from_millis(cli.checkpoint_interval));
     let shared = Arc::new(SharedState {
         db: match &cli.path {
             Some(path) => options.open(path)?,
