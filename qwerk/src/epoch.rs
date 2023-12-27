@@ -39,13 +39,13 @@ impl Display for Epoch {
 
 impl Epoch {
     #[must_use]
-    pub(crate) const fn increment(self) -> Self {
-        Self(self.0 + 1)
+    pub(crate) fn increment(self) -> Self {
+        Self(self.0.checked_add(1).unwrap())
     }
 
     #[must_use]
-    pub(crate) const fn decrement(self) -> Self {
-        Self(self.0 - 1)
+    pub(crate) fn decrement(self) -> Self {
+        Self(self.0.checked_sub(1).unwrap())
     }
 }
 

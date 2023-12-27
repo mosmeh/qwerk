@@ -9,7 +9,6 @@ use crate::{
 use crossbeam_queue::ArrayQueue;
 use parking_lot::{Condvar, MappedMutexGuard, Mutex, MutexGuard};
 use std::{
-    cell::OnceCell,
     fs::{DirBuilder, File},
     io::{IoSlice, Read, Write},
     num::NonZeroUsize,
@@ -46,8 +45,8 @@ impl Logger {
 
         let channels = Arc::new(SlottedCell::<LogChannel>::default());
 
-        // flush_req is not a member of LogChannel, because we want to tell
-        // flushers to exit by closing the channel, but the flushers hold
+        // flush_req_tx is not a member of LogChannel, because we want to tell
+        // flushers to exit by closing the flush_req, but the flushers hold
         // references to LogChannel.
         let (flush_req_tx, flush_req_rx) = crossbeam_channel::unbounded::<FlushRequest>();
 
@@ -80,7 +79,7 @@ impl Logger {
             let channels = channels.clone();
             let flush_req_tx = flush_req_tx.clone();
             std::thread::Builder::new()
-                .name("log_system_daemon".into())
+                .name("logger_daemon".into())
                 .spawn(move || run_daemon(&config, &channels, flush_req_tx, stop_rx).unwrap())
                 .unwrap()
         };
@@ -252,13 +251,7 @@ impl PersistentEpoch {
     fn update(&self, channels: &SlottedCell<LogChannel>) -> std::io::Result<Epoch> {
         let mut guard = self.durable_epoch.lock();
 
-        let mut min_epoch = None;
-        for channel in channels.iter() {
-            let epoch = channel.durable_epoch();
-            if min_epoch.map_or(true, |min_epoch| epoch < min_epoch) {
-                min_epoch = Some(epoch);
-            }
-        }
+        let min_epoch = channels.iter().map(LogChannel::durable_epoch).min();
 
         let prev_durable_epoch = *guard;
         let Some(new_durable_epoch) = min_epoch else {
@@ -389,8 +382,10 @@ impl<'a> ReservedCapacity<'a> {
         let buf = self.buf.as_mut().unwrap();
 
         let epoch = tid.epoch();
-        let min_epoch = *buf.min_epoch.get_or_init(|| epoch);
-        assert!(min_epoch <= epoch);
+        buf.max_epoch = Some(buf.max_epoch.map_or(epoch, |max_epoch| {
+            assert!(epoch >= max_epoch);
+            max_epoch.max(epoch)
+        }));
 
         buf.bytes.write_u64(tid.0);
 
@@ -464,7 +459,7 @@ impl WriteState {
     fn take_queueable_buf(&mut self) -> Option<LogBuf> {
         if let Some(buf) = &mut self.current_buf {
             if !buf.bytes.is_empty() {
-                assert!(buf.min_epoch.get().is_some());
+                assert!(buf.max_epoch.is_some());
                 return self.current_buf.take();
             }
         }
@@ -532,7 +527,7 @@ impl LogChannel {
 
     fn queue(&self, buf: LogBuf) {
         assert!(!buf.bytes.is_empty());
-        assert!(buf.min_epoch.get().is_some());
+        assert!(buf.max_epoch.is_some());
         self.flush_queue.push(buf).unwrap();
     }
 
@@ -552,23 +547,18 @@ impl LogChannel {
         assert!(self.flush_queue.len() <= self.config.buffers_per_writer.get());
 
         let mut bufs_to_flush = Vec::with_capacity(self.config.buffers_per_writer.get());
-        let min_epoch = OnceCell::new();
+        let mut max_epoch = Epoch(0);
         while let Some(buf) = self.flush_queue.pop() {
-            // Epoch is non-decreasing, so the first buffer has
-            // the smallest epoch.
-            let buf_min_epoch = *buf.min_epoch.get().unwrap();
-            let min_epoch = min_epoch.get_or_init(|| buf_min_epoch);
-            assert!(buf_min_epoch >= *min_epoch);
-
             assert!(!buf.bytes.is_empty());
             bufs_to_flush.push(buf.bytes);
+            max_epoch = max_epoch.max(buf.max_epoch.unwrap());
         }
 
         // Because the epoch queued to the channel is non-decreasing,
-        // we are sure that epochs <= min_epoch - 1 will be never queued to the
-        // channel. So we can declare that min_epoch - 1 is durable after
+        // we are sure that epochs <= max_epoch - 1 will be never queued to the
+        // channel. So we can declare that max_epoch - 1 is durable after
         // the flush.
-        let next_durable_epoch = min_epoch.get().unwrap().decrement();
+        let next_durable_epoch = max_epoch.decrement();
 
         assert!(!bufs_to_flush.is_empty());
         assert!(bufs_to_flush.len() <= self.config.buffers_per_writer.get());
@@ -632,7 +622,7 @@ impl LogChannel {
 #[derive(Debug)]
 struct LogBuf {
     bytes: Vec<u8>,
-    min_epoch: OnceCell<Epoch>,
+    max_epoch: Option<Epoch>,
 }
 
 impl LogBuf {
@@ -640,7 +630,7 @@ impl LogBuf {
         assert!(bytes.is_empty());
         Self {
             bytes,
-            min_epoch: Default::default(),
+            max_epoch: Default::default(),
         }
     }
 }
