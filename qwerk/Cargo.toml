@@ -10,7 +10,7 @@ crossbeam-utils = "0.8.18"
 parking_lot = "0.12.1"
 scc = "2.0.7"
 static_assertions = "1.1.0"
-thiserror = "1.0.51"
+thiserror = "1.0.52"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.151"
@@ -23,7 +23,7 @@ windows-sys = { version = "0.52.0", features = [
 ] }
 
 [dev-dependencies]
-anyhow = "1.0.76"
+anyhow = "1.0.77"
 clap = { version = "4.4.11", features = ["derive"] }
 tempfile = "3.8.1"
 
