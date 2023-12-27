@@ -49,7 +49,7 @@ impl ConcurrencyControlInternal for Pessimistic {
             Entry::Occupied(entry) => {
                 let record_ptr = *entry.get();
                 let record = unsafe { record_ptr.as_ref() };
-                let _guard = record.lock.write();
+                let _guard = record.lock.write().unwrap();
                 match record.tid.get().cmp(&tid) {
                     Ordering::Less => {
                         let value = value.map(Into::into);
@@ -115,8 +115,9 @@ impl Record {
 
 impl record::Record for Record {
     fn is_tombstone(&self) -> bool {
-        let _guard = self.lock.read();
-        unsafe { self.get() }.is_none()
+        self.lock
+            .read()
+            .map_or(true, |_guard| unsafe { self.get() }.is_none())
     }
 }
 
@@ -296,18 +297,12 @@ impl TransactionExecutor for Executor<'_> {
             }
             match item.kind {
                 ItemKind::Read if item.was_vacant => {
-                    // The record is removed while being exclusively locked.
-                    // This makes sure other transactions concurrently accessing
-                    // the record abort, as we are using NO_WAIT deadlock
-                    // prevention.
-                    assert!(record.lock.is_locked_exclusive());
+                    record.lock.kill();
                     self.index.remove(&item.key);
                     self.reclaimer
                         .defer_drop(unsafe { item.record_ptr.into_box() });
                 }
-                ItemKind::Read => {
-                    record.lock.force_unlock_read();
-                }
+                ItemKind::Read => record.lock.force_unlock_read(),
                 ItemKind::Write { .. } => {
                     record.tid.set(commit_tid);
                     record.lock.force_unlock_write();
@@ -327,7 +322,7 @@ impl TransactionExecutor for Executor<'_> {
         for item in self.rw_set.drain(..) {
             let record = unsafe { item.record_ptr.as_ref() };
             if item.was_vacant {
-                assert!(record.lock.is_locked_exclusive());
+                record.lock.kill();
                 self.index.remove(&item.key);
                 self.reclaimer
                     .defer_drop(unsafe { item.record_ptr.into_box() });
@@ -355,12 +350,14 @@ impl Executor<'_> {
             let mut enter_guard = self.reclaimer.enter();
             self.index.remove_if(&key, |record_ptr| {
                 let record = unsafe { record_ptr.as_ref() };
-                let write_guard = record.lock.write();
+                let Some(write_guard) = record.lock.write() else {
+                    return true;
+                };
                 if record.tid.get() != tid {
                     return false;
                 }
                 assert!(unsafe { record.get() }.is_none());
-                std::mem::forget(write_guard);
+                write_guard.kill();
                 enter_guard.defer_drop(unsafe { record_ptr.into_box() });
                 true
             });
