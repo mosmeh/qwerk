@@ -26,17 +26,17 @@ pub trait ConcurrencyControlInternal: Send + Sync + Default + 'static {
     where
         Self: 'a;
 
-    /// Loads a log entry into `index`.
+    /// Loads a record into `index`.
     ///
-    /// This method is called when the database is opened and before any
-    /// transactions are started.
+    /// This is called when the database is opened and before any transactions
+    /// are started.
     ///
-    /// Implementations should load the log entry
-    /// into `index`, and make sure a log entry with the largest `tid` for
-    /// `key` ends up in `index`.
+    /// This can be called multiple times for the same `key`. Implementations
+    /// should make sure a record with the highest `tid` for the `key` ends up
+    /// in `index`.
     ///
     /// `value` of `None` means a tombstone.
-    fn load_log_entry(
+    fn load_record(
         index: &Index<Self::Record>,
         key: SmallBytes,
         value: Option<Box<[u8]>>,

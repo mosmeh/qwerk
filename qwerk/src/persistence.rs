@@ -1,11 +1,14 @@
+mod checkpoint;
 mod log_reader;
 mod log_writer;
 mod recovery;
 
+pub use checkpoint::Config as CheckpointerConfig;
 pub use log_writer::{Config as LoggerConfig, LogEntry, LogWriter, PersistentEpoch};
 pub use recovery::recover;
 
-use crate::{file_lock::FileLock, Epoch, Result};
+use crate::{file_lock::FileLock, ConcurrencyControl, Epoch, Result};
+use checkpoint::Checkpointer;
 use log_writer::Logger;
 use std::{path::Path, sync::Arc};
 
@@ -31,18 +34,21 @@ fn is_log_file(path: &Path) -> bool {
 pub struct Persistence {
     persistent_epoch: Arc<PersistentEpoch>,
     logger: Logger,
+    _checkpointer: Checkpointer,
     _lock: FileLock,
 }
 
 impl Persistence {
-    pub fn new(
+    pub fn new<C: ConcurrencyControl>(
         lock: FileLock,
         persistent_epoch: Arc<PersistentEpoch>,
         logger_config: LoggerConfig,
+        checkpointer_config: CheckpointerConfig<C>,
     ) -> Result<Self> {
         Ok(Self {
             persistent_epoch,
             logger: Logger::new(logger_config)?,
+            _checkpointer: Checkpointer::new(checkpointer_config),
             _lock: lock,
         })
     }

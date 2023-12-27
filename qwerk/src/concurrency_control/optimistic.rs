@@ -39,7 +39,7 @@ impl ConcurrencyControlInternal for Optimistic {
     type Record = Record;
     type Executor<'a> = Executor<'a>;
 
-    fn load_log_entry(
+    fn load_record(
         index: &Index<Self::Record>,
         key: SmallBytes,
         value: Option<Box<[u8]>>,
@@ -181,6 +181,21 @@ impl Record {
 }
 
 impl record::Record for Record {
+    fn peek<F, T>(&self, f: F) -> Option<T>
+    where
+        F: FnOnce(&[u8], Tid) -> T,
+    {
+        if let Some(RecordSnapshot {
+            value: Some(value),
+            tid,
+        }) = self.read()
+        {
+            Some(f(value, tid))
+        } else {
+            None
+        }
+    }
+
     fn is_tombstone(&self) -> bool {
         self.buf_ptr.load(SeqCst).is_null()
     }
