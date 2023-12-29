@@ -36,7 +36,7 @@ impl Checkpointer {
                 .name("checkpointer".into())
                 .spawn(move || {
                     let mut reclaimer = config.reclamation.reclaimer();
-                    while !stop_rx.recv_timeout(config.interval) {
+                    for _ in stop_rx.tick(config.interval) {
                         checkpoint::<C>(&config.dir, &config.index, &mut reclaimer).unwrap();
                     }
                 })

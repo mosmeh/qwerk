@@ -1,7 +1,10 @@
 //! A single-producer single-consumer channel for sending a simple signal.
 
 use parking_lot::{Condvar, Mutex};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 pub fn channel() -> (Sender, Receiver) {
     let shared = Arc::new(Shared::default());
@@ -36,24 +39,45 @@ pub struct Receiver {
 }
 
 impl Receiver {
-    /// Waits for a signal to be received from the channel, but only for
-    /// a limited time.
+    /// Creates an iterator that yields with `interval` until a signal is
+    /// received from the channel.
     ///
-    /// Returns `true` if the signal was received, or `false` if the timeout
-    /// elapsed.
-    ///
-    /// Once the signal is received, this method will always return `true`
-    /// immediately in subsequent calls.
-    ///
-    /// If the `Sender` is dropped without sending a signal, this method will
-    /// block forever.
-    pub fn recv_timeout(&self, timeout: Duration) -> bool {
+    /// If a tick is missed, the iterator will yield immediately, and the next
+    /// tick will be scheduled `interval` after the yield.
+    pub fn tick(self, interval: Duration) -> Tick {
+        Tick {
+            receiver: self,
+            interval,
+            deadline: Instant::now() + interval,
+        }
+    }
+
+    fn recv_until(&self, deadline: Instant) -> bool {
         let mut guard = self.shared.mutex.lock();
         !self
             .shared
             .condvar
-            .wait_while_for(&mut guard, |signaled| !*signaled, timeout)
+            .wait_while_until(&mut guard, |signaled| !*signaled, deadline)
             .timed_out()
+    }
+}
+
+pub struct Tick {
+    receiver: Receiver,
+    interval: Duration,
+    deadline: Instant,
+}
+
+impl Iterator for Tick {
+    type Item = Instant;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.receiver.recv_until(self.deadline) {
+            return None;
+        }
+        let prev = self.deadline;
+        self.deadline = Instant::now() + self.interval;
+        Some(prev)
     }
 }
 
@@ -62,12 +86,12 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn test() {
+    fn tick() {
         let (tx, rx) = super::channel();
-        assert!(!rx.recv_timeout(Duration::from_millis(0)));
-        assert!(!rx.recv_timeout(Duration::from_millis(0)));
+        let mut tick = rx.tick(Duration::from_millis(0));
+        assert!(tick.next().is_some());
+        assert!(tick.next().is_some());
         tx.send();
-        assert!(rx.recv_timeout(Duration::from_millis(0)));
-        assert!(rx.recv_timeout(Duration::from_millis(0)));
+        assert!(tick.next().is_none());
     }
 }

@@ -72,7 +72,7 @@ impl EpochFramework {
                 .name("epoch_bumper".into())
                 .spawn(move || {
                     let mut global_epoch = initial_epoch.0;
-                    while !stop_rx.recv_timeout(epoch_duration) {
+                    for _ in stop_rx.tick(epoch_duration) {
                         for local_epoch in shared.local_epochs.iter() {
                             let backoff = Backoff::new();
                             while local_epoch.load(SeqCst) < global_epoch {
