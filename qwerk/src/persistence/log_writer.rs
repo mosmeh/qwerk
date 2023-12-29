@@ -157,7 +157,7 @@ fn run_daemon(
     flush_req_tx: crossbeam_channel::Sender<FlushRequest>,
     stop_rx: signal_channel::Receiver,
 ) -> std::io::Result<()> {
-    while !stop_rx.recv_timeout(config.epoch_fw.epoch_duration()) {
+    for _ in stop_rx.tick(config.epoch_fw.epoch_duration()) {
         for channel in channels.iter() {
             // Failure of this lock means that a writer is writing to
             // the buffer. In that case we can just let the writer
