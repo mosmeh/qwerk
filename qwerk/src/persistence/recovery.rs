@@ -22,6 +22,7 @@ pub fn recover<C: ConcurrencyControl>(
     dir: &Path,
     persistent_epoch: &PersistentEpoch,
     num_threads: NonZeroUsize,
+    max_file_size: usize,
 ) -> Result<(Index<C::Record>, Epoch)> {
     let durable_epoch = persistent_epoch.get();
     let mut latest_checkpoint_epoch = None;
@@ -131,7 +132,7 @@ pub fn recover<C: ConcurrencyControl>(
     if let Some(checkpoint_epoch) = latest_checkpoint_epoch {
         new_checkpoint_epoch = new_checkpoint_epoch.max(checkpoint_epoch.increment());
     }
-    let index = non_fuzzy_checkpoint(dir, index, new_checkpoint_epoch)?;
+    let index = non_fuzzy_checkpoint(dir, index, new_checkpoint_epoch, max_file_size)?;
 
     // Remove old checkpoint files, log files, and unfinished temporary files.
     for dir_entry in std::fs::read_dir(dir)? {

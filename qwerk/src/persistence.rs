@@ -12,8 +12,6 @@ use checkpoint::Checkpointer;
 use log_writer::Logger;
 use std::{io::Write, path::Path, str::FromStr, sync::Arc};
 
-const MAX_FILE_SIZE: usize = 32 * 1024 * 1024;
-
 pub struct Persistence {
     persistent_epoch: Arc<PersistentEpoch>,
     logger: Logger,
