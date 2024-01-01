@@ -103,7 +103,7 @@ impl Precommit<'_> {
     /// Flushes a log entry to the disk, if any.
     ///
     /// Returns `true` if a log entry was flushed.
-    pub fn flush_log_entry(mut self) -> std::io::Result<bool> {
+    pub fn flush_log_entry(&mut self) -> std::io::Result<bool> {
         let Some(log_entry) = self.log_entry.take() else {
             return Ok(false);
         };
