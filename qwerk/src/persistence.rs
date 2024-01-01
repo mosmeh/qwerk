@@ -1,14 +1,15 @@
-mod checkpoint;
+mod checkpoint_reader;
+mod checkpoint_writer;
 mod log_reader;
 mod log_writer;
 mod recovery;
 
-pub use checkpoint::Config as CheckpointerConfig;
+pub use checkpoint_writer::Config as CheckpointerConfig;
 pub use log_writer::{Config as LoggerConfig, LogEntry, LogWriter, PersistentEpoch};
 pub use recovery::recover;
 
 use crate::{file_lock::FileLock, record::Record, Epoch, Result};
-use checkpoint::Checkpointer;
+use checkpoint_writer::Checkpointer;
 use log_writer::Logger;
 use std::{io::Write, path::Path, str::FromStr, sync::Arc};
 
