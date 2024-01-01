@@ -79,7 +79,7 @@ impl<'a> PersistenceHandle<'a> {
         &self.log_writer
     }
 
-    pub fn persistent_epoch(&self) -> &'a PersistentEpoch {
-        self.persistent_epoch
+    pub fn wait_for_durability(&self, epoch: Epoch) {
+        self.persistent_epoch.wait_for(epoch);
     }
 }

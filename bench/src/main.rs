@@ -253,7 +253,8 @@ fn run_worker<C: ConcurrencyControl>(
         let key = i.to_ne_bytes();
         let mut txn = worker.transaction();
         txn.insert(key, &payload).unwrap();
-        txn.precommit().unwrap();
+        txn.wait_for_durability(false);
+        txn.commit().unwrap();
     }
     shared.barrier.wait(); // Signal that the database is populated
 
@@ -284,7 +285,8 @@ fn run_worker<C: ConcurrencyControl>(
                 }
             }
         }
-        let result = txn.precommit();
+        txn.wait_for_durability(false);
+        let result = txn.commit();
         if !shared.is_running.load(Ordering::Relaxed) {
             break;
         }
