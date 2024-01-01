@@ -13,7 +13,6 @@ use crossbeam_utils::Backoff;
 use scc::hash_index::Entry;
 use std::{
     cell::{Cell, UnsafeCell},
-    cmp::Ordering,
     collections::VecDeque,
 };
 
@@ -50,14 +49,10 @@ impl ConcurrencyControlInternal for Pessimistic {
                 let record_ptr = *entry.get();
                 let record = unsafe { record_ptr.as_ref() };
                 let _guard = record.lock.write().unwrap();
-                match record.tid.get().cmp(&tid) {
-                    Ordering::Less => {
-                        let value = value.map(Into::into);
-                        unsafe { record.set(value) };
-                        record.tid.set(tid);
-                    }
-                    Ordering::Equal => unreachable!(),
-                    Ordering::Greater => (),
+                if tid > record.tid.get() {
+                    let value = value.map(Into::into);
+                    unsafe { record.set(value) };
+                    record.tid.set(tid);
                 }
             }
             Entry::Vacant(entry) => {
@@ -377,8 +372,11 @@ impl Executor<'_> {
 impl Drop for Executor<'_> {
     fn drop(&mut self) {
         let backoff = Backoff::new();
-        while !self.removal_queue.is_empty() {
+        loop {
             self.process_removal_queue();
+            if self.removal_queue.is_empty() {
+                break;
+            }
             backoff.snooze();
         }
     }

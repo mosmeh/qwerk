@@ -40,3 +40,4 @@ missing_panics_doc = { level = "allow", priority = 1 }
 module_name_repetitions = { level = "allow", priority = 1 }
 must_use_candidate = { level = "allow", priority = 1 }
 needless_pass_by_value = { level = "allow", priority = 1 }
+too_many_lines = { level = "allow", priority = 1 }

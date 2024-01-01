@@ -76,7 +76,7 @@ impl<C: ConcurrencyControl> Default for DatabaseOptions<C> {
                 .unwrap(),
             epoch_duration: Duration::from_millis(40), // Default in the Silo paper (Tu et al. 2013).
             gc_threshold: 4096,
-            checkpoint_interval: Duration::from_secs(30),
+            checkpoint_interval: Duration::from_secs(10),
             log_buffer_size: 1024 * 1024,
             log_buffers_per_worker: 8.try_into().unwrap(),
         }
@@ -116,17 +116,10 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
             FileLock::try_lock_exclusive(dir.join("lock"))?.ok_or(Error::DatabaseAlreadyOpen)?;
 
         let persistent_epoch = Arc::new(PersistentEpoch::new(&dir)?);
-        let durable_epoch = persistent_epoch.get();
-        let index = Arc::new(persistence::recover::<C>(
-            &dir,
-            durable_epoch,
-            self.background_threads,
-        )?);
-        let epoch_fw = Arc::new(EpochFramework::new(
-            durable_epoch.increment(),
-            self.epoch_duration,
-        ));
-
+        let (index, initial_epoch) =
+            persistence::recover::<C>(&dir, &persistent_epoch, self.background_threads)?;
+        let epoch_fw = Arc::new(EpochFramework::new(initial_epoch, self.epoch_duration));
+        let index = Arc::new(index);
         let reclamation = Arc::new(MemoryReclamation::new(self.gc_threshold));
 
         let persistence = Persistence::new(
@@ -135,15 +128,17 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
             LoggerConfig {
                 dir: dir.clone(),
                 epoch_fw: epoch_fw.clone(),
-                persistent_epoch,
+                persistent_epoch: persistent_epoch.clone(),
                 flushing_threads: self.background_threads,
                 preallocated_buffer_size: self.log_buffer_size,
                 buffers_per_writer: self.log_buffers_per_worker,
             },
-            CheckpointerConfig::<C> {
+            CheckpointerConfig {
                 dir,
                 index: index.clone(),
+                epoch_fw: epoch_fw.clone(),
                 reclamation: reclamation.clone(),
+                persistent_epoch,
                 interval: self.checkpoint_interval,
             },
         )?;
@@ -192,7 +187,7 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
         self
     }
 
-    /// The interval between checkpoints. Defaults to 30 seconds.
+    /// The interval between checkpoints. Defaults to 10 seconds.
     #[must_use]
     pub fn checkpoint_interval(mut self, interval: Duration) -> Self {
         self.checkpoint_interval = interval;
