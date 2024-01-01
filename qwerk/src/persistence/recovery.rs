@@ -1,11 +1,8 @@
 use super::{
-    checkpoint::non_fuzzy_checkpoint, log_reader::LogReader, CheckpointFileId, FileId, LogFileId,
-    PersistentEpoch,
+    checkpoint_reader::CheckpointReader, checkpoint_writer::non_fuzzy_checkpoint,
+    log_reader::LogReader, CheckpointFileId, FileId, LogFileId, PersistentEpoch,
 };
-use crate::{
-    persistence::checkpoint::CheckpointReader, record::Record, ConcurrencyControl, Epoch, Index,
-    Result,
-};
+use crate::{record::Record, ConcurrencyControl, Epoch, Index, Result};
 use crossbeam_queue::ArrayQueue;
 use std::{
     cmp::Ordering,
