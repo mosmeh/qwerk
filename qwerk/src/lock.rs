@@ -18,7 +18,7 @@ const READER_FULL: u64 = !(READER - 1);
 
 /// A reader-writer lock.
 ///
-/// This lock is similar to [`RwLock`], but it allows upgrading a read lock to
+/// This lock is similar to `RwLock`, but it allows upgrading a read lock to
 /// a write lock.
 ///
 /// This lock also has a "dead" state, which is used to indicate that the lock
