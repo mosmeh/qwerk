@@ -230,3 +230,14 @@ impl<W: Write> Write for WriteBytesCounter<W> {
         self.inner.flush()
     }
 }
+
+#[allow(clippy::unnecessary_wraps)]
+fn fsync_dir(dir: &Path) -> std::io::Result<()> {
+    assert!(dir.is_dir());
+
+    // FlushFileBuffers can't be used on directories.
+    #[cfg(not(target_os = "windows"))]
+    std::fs::File::open(dir)?.sync_data()?;
+
+    Ok(())
+}

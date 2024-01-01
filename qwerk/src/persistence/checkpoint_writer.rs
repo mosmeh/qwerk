@@ -8,7 +8,7 @@
 //! by themselves, and should be combined with the log files to recover
 //! the consistent state of the database.
 
-use super::{CheckpointFileId, FileId, LogFileId, PersistentEpoch, WriteBytesCounter};
+use super::{fsync_dir, CheckpointFileId, FileId, LogFileId, PersistentEpoch, WriteBytesCounter};
 use crate::{
     bytes_ext::WriteBytesExt,
     epoch::EpochFramework,
@@ -206,8 +206,7 @@ fn checkpoint<R: Record>(
     )?;
 
     // Persist the rename.
-    #[cfg(not(target_os = "windows"))] // FlushFileBuffers can't be used on directories.
-    File::open(dir)?.sync_data()?;
+    fsync_dir(dir)?;
 
     // Remove old checkpoint and log files.
     for dir_entry in std::fs::read_dir(dir)? {

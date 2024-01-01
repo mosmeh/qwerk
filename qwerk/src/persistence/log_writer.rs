@@ -1,4 +1,4 @@
-use super::{LogFileId, WriteBytesCounter};
+use super::{fsync_dir, LogFileId, WriteBytesCounter};
 use crate::{
     bytes_ext::{ByteVecExt, BytesExt},
     epoch::{Epoch, EpochFramework},
@@ -196,6 +196,7 @@ fn run_daemon(
 
 /// Global durable epoch persisted to the disk.
 pub struct PersistentEpoch {
+    dir: PathBuf,
     path: PathBuf,
     tmp_path: PathBuf,
 
@@ -224,6 +225,7 @@ impl PersistentEpoch {
         };
         let tmp_path = path.with_extension("tmp");
         Ok(Self {
+            dir: dir.into(),
             path,
             tmp_path,
             durable_epoch: Epoch(epoch).into(),
@@ -280,7 +282,9 @@ impl PersistentEpoch {
 
         // Atomically replace the file.
         std::fs::rename(&self.tmp_path, &self.path)?;
-        // TODO: fsync the parent directory.
+
+        // Persist the rename.
+        fsync_dir(&self.dir)?;
 
         *guard = new_durable_epoch;
         drop(guard);
@@ -660,7 +664,8 @@ impl LogChannel {
                     .open(&state.file_path)?,
             ));
 
-            // TODO: fsync the parent directory to persist the rename.
+            // Persist the rename.
+            fsync_dir(&self.config.dir)?;
         }
 
         Ok(())
