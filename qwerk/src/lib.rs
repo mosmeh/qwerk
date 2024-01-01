@@ -59,27 +59,30 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct DatabaseOptions<C: ConcurrencyControl = DefaultProtocol> {
     concurrency_control: C,
-    background_threads: NonZeroUsize,
     epoch_duration: Duration,
     gc_threshold: usize,
+    recovery_threads: NonZeroUsize,
+    logging_threads: NonZeroUsize,
     checkpoint_interval: Duration,
     log_buffer_size: usize,
     log_buffers_per_worker: NonZeroUsize,
+    max_file_size: usize,
 }
 
 impl<C: ConcurrencyControl> Default for DatabaseOptions<C> {
     fn default() -> Self {
+        let num_cpus =
+            std::thread::available_parallelism().unwrap_or_else(|_| 1.try_into().unwrap());
         Self {
             concurrency_control: Default::default(),
-            background_threads: std::thread::available_parallelism()
-                .map_or(1, |n| n.get().min(4))
-                .try_into()
-                .unwrap(),
             epoch_duration: Duration::from_millis(40), // Default in the Silo paper (Tu et al. 2013).
             gc_threshold: 4096,
+            recovery_threads: num_cpus,
+            logging_threads: 1.try_into().unwrap(),
             checkpoint_interval: Duration::from_secs(10),
             log_buffer_size: 1024 * 1024,
             log_buffers_per_worker: 8.try_into().unwrap(),
+            max_file_size: 32 * 1024 * 1024,
         }
     }
 }
@@ -117,8 +120,12 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
             FileLock::try_lock_exclusive(dir.join("lock"))?.ok_or(Error::DatabaseAlreadyOpen)?;
 
         let persistent_epoch = Arc::new(PersistentEpoch::new(&dir)?);
-        let (index, initial_epoch) =
-            persistence::recover::<C>(&dir, &persistent_epoch, self.background_threads)?;
+        let (index, initial_epoch) = persistence::recover::<C>(
+            &dir,
+            &persistent_epoch,
+            self.recovery_threads,
+            self.max_file_size,
+        )?;
         let epoch_fw = Arc::new(EpochFramework::new(initial_epoch, self.epoch_duration));
         let index = Arc::new(index);
         let reclamation = Arc::new(MemoryReclamation::new(self.gc_threshold));
@@ -130,9 +137,10 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
                 dir: dir.clone(),
                 epoch_fw: epoch_fw.clone(),
                 persistent_epoch: persistent_epoch.clone(),
-                flushing_threads: self.background_threads,
+                flushing_threads: self.logging_threads,
                 preallocated_buffer_size: self.log_buffer_size,
                 buffers_per_writer: self.log_buffers_per_worker,
+                max_file_size: self.max_file_size,
             },
             CheckpointerConfig {
                 dir,
@@ -141,6 +149,7 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
                 reclamation: reclamation.clone(),
                 persistent_epoch,
                 interval: self.checkpoint_interval,
+                max_file_size: self.max_file_size,
             },
         )?;
 
@@ -164,14 +173,6 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
         }
     }
 
-    /// The number of background threads used for logging and recovery.
-    /// Defaults to the smaller of the number of CPU cores and 4.
-    #[must_use]
-    pub fn background_threads(mut self, n: NonZeroUsize) -> Self {
-        self.background_threads = n;
-        self
-    }
-
     /// The duration of an epoch. Defaults to 40 milliseconds.
     #[must_use]
     pub fn epoch_duration(mut self, duration: Duration) -> Self {
@@ -185,6 +186,22 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
     #[must_use]
     pub fn gc_threshold(mut self, bytes: usize) -> Self {
         self.gc_threshold = bytes;
+        self
+    }
+
+    /// The number of threads used for recovery.
+    /// Defaults to the number of CPU cores.
+    #[must_use]
+    pub fn recovery_threads(mut self, n: NonZeroUsize) -> Self {
+        self.recovery_threads = n;
+        self
+    }
+
+    /// The number of background threads used for logging.
+    /// Defaults to 1.
+    #[must_use]
+    pub fn logging_threads(mut self, n: NonZeroUsize) -> Self {
+        self.logging_threads = n;
         self
     }
 
@@ -207,6 +224,14 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
     #[must_use]
     pub fn log_buffers_per_worker(mut self, n: NonZeroUsize) -> Self {
         self.log_buffers_per_worker = n;
+        self
+    }
+
+    /// The maximum size of a single chunk of a checkpoint or log file.
+    /// Defaults to 32 MiB.
+    #[must_use]
+    pub fn max_file_size(mut self, bytes: usize) -> Self {
+        self.max_file_size = bytes;
         self
     }
 }

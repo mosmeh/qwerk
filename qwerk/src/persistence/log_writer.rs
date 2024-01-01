@@ -2,7 +2,6 @@ use super::{LogFileId, WriteBytesCounter};
 use crate::{
     bytes_ext::{ByteVecExt, BytesExt},
     epoch::{Epoch, EpochFramework},
-    persistence::MAX_FILE_SIZE,
     signal_channel,
     slotted_cell::{Slot, SlottedCell},
     tid::Tid,
@@ -29,6 +28,7 @@ pub struct Config {
     pub flushing_threads: NonZeroUsize,
     pub preallocated_buffer_size: usize,
     pub buffers_per_writer: NonZeroUsize,
+    pub max_file_size: usize,
 }
 
 /// A redo logger.
@@ -637,7 +637,9 @@ impl LogChannel {
         //     the max epoch of the previous archived log file.
         // (1) ensures we don't roll over the log file too frequently.
         // (2) ensures the file names of the archived log files are unique.
-        if file.num_bytes_written() > MAX_FILE_SIZE && max_epoch > state.last_archived_epoch {
+        if file.num_bytes_written() > self.config.max_file_size
+            && max_epoch > state.last_archived_epoch
+        {
             // Close the current file.
             state.file.take().unwrap();
 

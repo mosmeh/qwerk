@@ -8,9 +8,7 @@
 //! by themselves, and should be combined with the log files to recover
 //! the consistent state of the database.
 
-use super::{
-    CheckpointFileId, FileId, LogFileId, PersistentEpoch, WriteBytesCounter, MAX_FILE_SIZE,
-};
+use super::{CheckpointFileId, FileId, LogFileId, PersistentEpoch, WriteBytesCounter};
 use crate::{
     bytes_ext::{ReadBytesExt, WriteBytesExt},
     epoch::EpochFramework,
@@ -38,6 +36,7 @@ pub struct Config<R: Record> {
     pub reclamation: Arc<MemoryReclamation>,
     pub persistent_epoch: Arc<PersistentEpoch>,
     pub interval: Duration,
+    pub max_file_size: usize,
 }
 
 pub struct Checkpointer {
@@ -65,6 +64,7 @@ impl Checkpointer {
                             &config.persistent_epoch,
                             &mut reclaimer,
                             epoch,
+                            config.max_file_size,
                         )
                         .unwrap(); // TODO: Handle errors.
                         last_epoch = Some(epoch);
@@ -94,13 +94,14 @@ pub fn non_fuzzy_checkpoint<R: Record>(
     dir: &Path,
     index: Index<R>,
     epoch: Epoch,
+    max_file_size: usize,
 ) -> std::io::Result<Index<R>> {
     // We don't have any concurrent accesses to the index, so we can use a dummy
     // reclaimer.
     let reclamation = MemoryReclamation::new(usize::MAX);
     let mut reclaimer = reclamation.reclaimer();
 
-    checkpoint(dir, &index, None, &mut reclaimer, epoch)?;
+    checkpoint(dir, &index, None, &mut reclaimer, epoch, max_file_size)?;
     Ok(index)
 }
 
@@ -114,8 +115,16 @@ fn fuzzy_checkpoint<R: Record>(
     persistent_epoch: &PersistentEpoch,
     reclaimer: &mut Reclaimer<R>,
     start_epoch: Epoch,
+    max_file_size: usize,
 ) -> std::io::Result<()> {
-    checkpoint(dir, index, Some(persistent_epoch), reclaimer, start_epoch)
+    checkpoint(
+        dir,
+        index,
+        Some(persistent_epoch),
+        reclaimer,
+        start_epoch,
+        max_file_size,
+    )
 }
 
 fn checkpoint<R: Record>(
@@ -124,6 +133,7 @@ fn checkpoint<R: Record>(
     persistent_epoch: Option<&PersistentEpoch>,
     reclaimer: &mut Reclaimer<R>,
     start_epoch: Epoch,
+    max_file_size: usize,
 ) -> std::io::Result<()> {
     let mut cursor: Option<OccupiedEntry<_, _>> = None;
     let mut max_epoch = None;
@@ -160,7 +170,7 @@ fn checkpoint<R: Record>(
                     .flatten();
                 enter_guard.quiesce();
                 max_epoch = max_epoch.max(epoch);
-                if file.num_bytes_written() >= MAX_FILE_SIZE {
+                if file.num_bytes_written() >= max_file_size {
                     cursor = Some(entry);
                     break;
                 }

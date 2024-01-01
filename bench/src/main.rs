@@ -28,8 +28,8 @@ struct Cli {
     #[arg(long, default_value_t = 8)]
     threads: usize,
 
-    #[arg(long, default_value = "4")]
-    background_threads: NonZeroUsize,
+    #[arg(long, default_value = "1")]
+    logging_threads: NonZeroUsize,
 
     #[arg(long, default_value_t = 100000)]
     records: u64,
@@ -130,7 +130,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli, concurrency_control: C) -> any
     };
 
     let options = DatabaseOptions::with_concurrency_control(concurrency_control)
-        .background_threads(cli.background_threads)
+        .logging_threads(cli.logging_threads)
         .checkpoint_interval(Duration::from_millis(cli.checkpoint_interval));
     let shared = Arc::new(SharedState {
         db: match &cli.path {
