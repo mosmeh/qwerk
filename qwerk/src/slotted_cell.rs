@@ -1,9 +1,10 @@
 // Based on the design of thread_local crate
 // https://github.com/Amanieu/thread_local-rs/blob/faa4409fafa3a5b4898c4e5025733f760a3eb665/src/lib.rs
 
-use parking_lot::Once;
 use std::{
     cell::UnsafeCell,
+    convert::Infallible,
+    fmt::{Debug, Formatter},
     marker::PhantomData,
     mem::MaybeUninit,
     ops::Deref,
@@ -69,6 +70,17 @@ impl<T> SlottedCell<T> {
     where
         F: FnOnce(usize) -> T,
     {
+        self.try_alloc_with(|i| -> Result<T, Infallible> { Ok(f(i)) })
+            .unwrap()
+    }
+
+    /// Allocates a slot in the cell, initializing it with `f` if the slot was
+    /// empty. If the slot was empty and `f` returns an error, the error is
+    /// returned and the slot remains unallocated and empty.
+    pub fn try_alloc_with<F, E>(&self, f: F) -> Result<Slot<T>, E>
+    where
+        F: FnOnce(usize) -> Result<T, E>,
+    {
         let mut index = 0;
         for (bucket_index, bucket) in self.buckets.iter().enumerate() {
             let bucket_len = bucket_len(bucket_index);
@@ -92,11 +104,17 @@ impl<T> SlottedCell<T> {
                 let result = entry
                     .is_occupied
                     .compare_exchange(false, true, SeqCst, SeqCst);
-                if result.is_ok() {
-                    entry.init(index, f);
-                    return Slot { entry };
+                if result.is_err() {
+                    index += 1;
+                    continue;
                 }
-                index += 1;
+                return match entry.init_once(index, f) {
+                    Ok(()) => Ok(Slot { entry }),
+                    Err(e) => {
+                        entry.is_occupied.store(false, SeqCst);
+                        Err(e)
+                    }
+                };
             }
         }
 
@@ -125,7 +143,7 @@ impl<T> Drop for SlottedCell<T> {
 
 struct Entry<T> {
     is_occupied: AtomicBool,
-    once: Once,
+    is_initialized: AtomicBool,
     value: UnsafeCell<MaybeUninit<T>>,
     phantom: PhantomData<T>,
 }
@@ -134,7 +152,7 @@ impl<T> Default for Entry<T> {
     fn default() -> Self {
         Self {
             is_occupied: Default::default(),
-            once: Once::new(),
+            is_initialized: Default::default(),
             value: UnsafeCell::new(MaybeUninit::uninit()),
             phantom: Default::default(),
         }
@@ -143,7 +161,7 @@ impl<T> Default for Entry<T> {
 
 impl<T> Drop for Entry<T> {
     fn drop(&mut self) {
-        if self.once.state().done() {
+        if *self.is_initialized.get_mut() {
             unsafe { (*self.value.get()).assume_init_drop() };
         }
     }
@@ -151,9 +169,8 @@ impl<T> Drop for Entry<T> {
 
 impl<T> Entry<T> {
     fn get(&self) -> Option<&T> {
-        self.once
-            .state()
-            .done()
+        self.is_initialized
+            .load(SeqCst)
             .then(|| unsafe { self.get_unchecked() })
     }
 
@@ -161,14 +178,17 @@ impl<T> Entry<T> {
         (*self.value.get()).assume_init_ref()
     }
 
-    fn init<F>(&self, index: usize, f: F)
+    fn init_once<F, E>(&self, index: usize, f: F) -> Result<(), E>
     where
-        F: FnOnce(usize) -> T,
+        F: FnOnce(usize) -> Result<T, E>,
     {
-        self.once.call_once_force(|_| {
-            let value = f(index);
-            unsafe { (*self.value.get()).write(value) };
-        });
+        if !self.is_initialized.load(SeqCst) {
+            let value = f(index)?;
+            let ptr = self.value.get();
+            unsafe { &mut *ptr }.write(value);
+            self.is_initialized.store(true, SeqCst);
+        }
+        Ok(())
     }
 }
 
@@ -187,13 +207,21 @@ const fn bucket_len(bucket_index: usize) -> usize {
 
 /// A slot in a [`SlottedCell`].
 ///
-/// Dropping a `Slot` will mark a slot as free and allow it to be
+/// Dropping a `Slot` will mark a slot as unoccupied and allow it to be
 /// reused by a subsequent call to [`SlottedCell::alloc`] or
 /// [`SlottedCell::alloc_with`].
 /// However, the value will not be dropped and will remain in the slot until
 /// the [`SlottedCell`] is dropped.
 pub struct Slot<'a, T> {
     entry: &'a Entry<T>,
+}
+
+impl<T> Slot<'_, T> {
+    fn value(&self) -> &T {
+        // SAFETY: The Slot is crated only when the Entry is successfully
+        //         occupied and initialized.
+        unsafe { self.entry.get_unchecked() }
+    }
 }
 
 impl<T> Drop for Slot<'_, T> {
@@ -207,7 +235,13 @@ impl<T> Deref for Slot<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { self.entry.get_unchecked() }
+        self.value()
+    }
+}
+
+impl<T: Debug> Debug for Slot<'_, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Slot").field(&self.value()).finish()
     }
 }
 
@@ -261,7 +295,7 @@ impl<'a, T> Iterator for Iter<'a, T> {
 #[cfg(test)]
 mod tests {
     use super::SlottedCell;
-    use std::{cell::Cell, rc::Rc};
+    use std::{cell::Cell, convert::Infallible, rc::Rc};
 
     #[test]
     fn alloc() {
@@ -292,6 +326,27 @@ mod tests {
         assert_ne!(slot1.as_ptr(), slot2.as_ptr());
         assert_eq!(slot1.get(), 1);
         assert_eq!(slot2.get(), 2);
+    }
+
+    #[test]
+    fn try_alloc_with() {
+        let cell = SlottedCell::default();
+
+        let err = cell
+            .try_alloc_with(|i| {
+                assert_eq!(i, 0);
+                Err(123)
+            })
+            .unwrap_err();
+        assert_eq!(err, 123);
+
+        let slot = cell
+            .try_alloc_with(|i| -> Result<_, Infallible> {
+                assert_eq!(i, 0);
+                Ok(456)
+            })
+            .unwrap();
+        assert_eq!(*slot, 456);
     }
 
     #[test]

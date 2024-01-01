@@ -260,17 +260,21 @@ impl<C: ConcurrencyControl> Database<C> {
     ///
     /// You usually should spawn one [`Worker`] per thread, and reuse the
     /// [`Worker`] for multiple transactions.
-    pub fn worker(&self) -> Worker<C> {
+    pub fn worker(&self) -> std::io::Result<Worker<C>> {
         let epoch_participant = self.epoch_fw.participant();
         let reclaimer = self.reclamation.reclaimer();
-        Worker {
+        Ok(Worker {
             txn_executor: self.concurrency_control.executor(
                 &self.index,
                 epoch_participant,
                 reclaimer,
             ),
-            persistence: self.persistence.as_ref().map(Persistence::handle),
-        }
+            persistence: self
+                .persistence
+                .as_ref()
+                .map(Persistence::handle)
+                .transpose()?,
+        })
     }
 
     /// Returns the current durable epoch.

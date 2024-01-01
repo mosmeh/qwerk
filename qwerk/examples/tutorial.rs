@@ -13,7 +13,7 @@ fn main() -> Result<()> {
     // workloads.
 
     // You need to spawn workers to execute transactions.
-    let mut worker = db.worker();
+    let mut worker = db.worker()?;
 
     // All the operations (insert, remove, get, and commit) can fail due to
     // conflicts with other concurrent transactions.
