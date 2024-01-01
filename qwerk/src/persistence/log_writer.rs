@@ -1,6 +1,8 @@
+use super::{LogFileId, WriteBytesCounter};
 use crate::{
     bytes_ext::{ByteVecExt, BytesExt},
     epoch::{Epoch, EpochFramework},
+    persistence::MAX_FILE_SIZE,
     signal_channel,
     slotted_cell::{Slot, SlottedCell},
     tid::Tid,
@@ -66,7 +68,7 @@ impl Logger {
                             continue;
                         }
                         let mut state = channel.flush_state.lock();
-                        channel.flush(&mut state).unwrap();
+                        channel.flush(&mut state).unwrap(); // TODO: Handle errors.
                     }
                 })
             })
@@ -80,7 +82,7 @@ impl Logger {
             let flush_req_tx = flush_req_tx.clone();
             std::thread::Builder::new()
                 .name("logger_daemon".into())
-                .spawn(move || run_daemon(&config, &channels, flush_req_tx, stop_rx).unwrap())
+                .spawn(move || run_daemon(&config, &channels, flush_req_tx, stop_rx))
                 .unwrap()
         };
 
@@ -156,7 +158,7 @@ fn run_daemon(
     channels: &SlottedCell<LogChannel>,
     flush_req_tx: crossbeam_channel::Sender<FlushRequest>,
     stop_rx: signal_channel::Receiver,
-) -> std::io::Result<()> {
+) {
     for _ in stop_rx.tick(config.epoch_fw.epoch_duration()) {
         for channel in channels.iter() {
             // Failure of this lock means that a writer is writing to
@@ -188,9 +190,8 @@ fn run_daemon(
         }
 
         // 3. Update and persist the global durable epoch.
-        config.persistent_epoch.update(channels)?;
+        config.persistent_epoch.update(channels).unwrap(); // TODO: Handle errors.
     }
-    Ok(())
 }
 
 /// Global durable epoch persisted to the disk.
@@ -221,9 +222,10 @@ impl PersistentEpoch {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
             Err(e) => return Err(e.into()),
         };
+        let tmp_path = path.with_extension("tmp");
         Ok(Self {
             path,
-            tmp_path: dir.join("durable_epoch.tmp"),
+            tmp_path,
             durable_epoch: Epoch(epoch).into(),
             update_condvar: Default::default(),
         })
@@ -468,7 +470,9 @@ impl WriteState {
 }
 
 struct FlushState {
-    file: File,
+    file: Option<WriteBytesCounter<File>>,
+    file_path: PathBuf,
+    last_archived_epoch: Epoch,
     free_bufs_tx: crossbeam_channel::Sender<Vec<u8>>,
 }
 
@@ -489,10 +493,16 @@ pub struct LogChannel {
 
 impl LogChannel {
     fn new(index: usize, config: Arc<Config>) -> std::io::Result<Self> {
-        let path = config
-            .dir
-            .join(format!("{}{}", super::LOG_FILE_NAME_PREFIX, index));
-        let file = File::create(path)?;
+        let file_path = config.dir.join(
+            LogFileId::Current {
+                channel_index: index,
+            }
+            .file_name(),
+        );
+        let file = File::options()
+            .write(true)
+            .create_new(true)
+            .open(&file_path)?;
 
         let flush_queue = ArrayQueue::new(config.buffers_per_writer.get());
 
@@ -517,7 +527,12 @@ impl LogChannel {
                 current_buf: Default::default(),
                 free_bufs_rx,
             }),
-            flush_state: Mutex::new(FlushState { file, free_bufs_tx }),
+            flush_state: Mutex::new(FlushState {
+                file: Some(WriteBytesCounter::new(file)),
+                file_path,
+                last_archived_epoch: Epoch(0),
+                free_bufs_tx,
+            }),
         })
     }
 
@@ -563,6 +578,7 @@ impl LogChannel {
         assert!(!bufs_to_flush.is_empty());
         assert!(bufs_to_flush.len() <= self.config.buffers_per_writer.get());
 
+        let file = state.file.as_mut().unwrap();
         let mut start_buf_index = 0;
         let mut start_byte_offset = 0;
         while start_buf_index < bufs_to_flush.len() {
@@ -576,8 +592,8 @@ impl LogChannel {
                     .map(|buf| IoSlice::new(buf)),
             );
 
-            // TODO: Use write_vectored_all once it is stabilized.
-            let result = state.file.write_vectored(&slices);
+            // TODO: Use write_all_vectored once it is stabilized.
+            let result = file.write_vectored(&slices);
             match result {
                 Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
                 Ok(n) => {
@@ -610,10 +626,40 @@ impl LogChannel {
         }
         assert_eq!(start_buf_index, bufs_to_flush.len());
 
-        state.file.sync_data()?;
+        file.get_ref().sync_data()?;
 
         let prev_durable_epoch = Epoch(self.durable_epoch.swap(next_durable_epoch.0, SeqCst));
         assert!(prev_durable_epoch <= next_durable_epoch);
+
+        // Roll over the log file if
+        // (1) The file is large enough, and
+        // (2) The max epoch of the new archived log file will be different from
+        //     the max epoch of the previous archived log file.
+        // (1) ensures we don't roll over the log file too frequently.
+        // (2) ensures the file names of the archived log files are unique.
+        if file.num_bytes_written() > MAX_FILE_SIZE && max_epoch > state.last_archived_epoch {
+            // Close the current file.
+            state.file.take().unwrap();
+
+            let archive_path = self.config.dir.join(
+                LogFileId::Archive {
+                    channel_index: self.index,
+                    max_epoch,
+                }
+                .file_name(),
+            );
+            std::fs::rename(&state.file_path, archive_path)?;
+
+            state.last_archived_epoch = max_epoch;
+            state.file = Some(WriteBytesCounter::new(
+                File::options()
+                    .write(true)
+                    .create_new(true)
+                    .open(&state.file_path)?,
+            ));
+
+            // TODO: fsync the parent directory to persist the rename.
+        }
 
         Ok(())
     }

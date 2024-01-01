@@ -39,7 +39,7 @@ struct Cli {
     #[arg(long, default_value_t = 2000)]
     duration: u64,
 
-    #[arg(long, default_value_t = 30000)]
+    #[arg(long, default_value_t = 10000)]
     checkpoint_interval: u64,
 
     #[arg(long, default_value_t = 4)]

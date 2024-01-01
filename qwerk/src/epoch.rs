@@ -10,6 +10,7 @@ use crate::{
 use crossbeam_utils::{Backoff, CachePadded};
 use std::{
     fmt::{Display, Formatter},
+    str::FromStr,
     sync::{
         atomic::{AtomicU32, Ordering::SeqCst},
         Arc,
@@ -34,6 +35,14 @@ pub struct Epoch(pub u32);
 impl Display for Epoch {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+impl FromStr for Epoch {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(Self(s.parse()?))
     }
 }
 
