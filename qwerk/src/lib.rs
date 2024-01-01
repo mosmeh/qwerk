@@ -29,6 +29,7 @@ use small_bytes::SmallBytes;
 use std::{num::NonZeroUsize, path::Path, sync::Arc, time::Duration};
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Database is already open.
     #[error("database is already open")]

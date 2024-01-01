@@ -136,7 +136,7 @@ impl EpochFramework {
 impl Drop for EpochFramework {
     fn drop(&mut self) {
         self.stop_tx.send();
-        let _ = std::mem::take(&mut self.epoch_bumper).unwrap().join();
+        let _ = self.epoch_bumper.take().unwrap().join();
     }
 }
 
