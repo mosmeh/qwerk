@@ -8,7 +8,7 @@ use std::{
     marker::PhantomData,
     mem::MaybeUninit,
     ops::Deref,
-    sync::atomic::{AtomicBool, AtomicPtr, Ordering::SeqCst},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering::SeqCst},
 };
 
 const NUM_BUCKETS: usize = (usize::BITS - 1) as usize;
@@ -16,6 +16,7 @@ const NUM_BUCKETS: usize = (usize::BITS - 1) as usize;
 /// A cell that can store multiple values in locations called slots.
 pub struct SlottedCell<T> {
     buckets: [AtomicPtr<Entry<T>>; NUM_BUCKETS],
+    unoccupied_index_lower_bound: AtomicUsize,
 }
 
 impl<T> SlottedCell<T> {
@@ -38,18 +39,21 @@ impl<T> SlottedCell<T> {
             //         arrays have the same representation as
             //         a sequence of their inner type.
             buckets: unsafe { std::mem::transmute(buckets) },
+            unoccupied_index_lower_bound: 0.into(),
         }
     }
 
     /// Returns the value at the given index, or `None` if the index is out of
     /// bounds or the slot is empty.
     pub fn get(&self, index: usize) -> Option<&T> {
-        let bucket_index = (usize::BITS - (index + 1).leading_zeros() - 1) as usize;
+        let EntryLocation {
+            bucket_index,
+            entry_index,
+        } = EntryLocation::from_index(index);
         let entries = self.buckets[bucket_index].load(SeqCst);
         if entries.is_null() {
             return None;
         }
-        let entry_index = index - (bucket_len(bucket_index) - 1);
         let entry = unsafe { &*entries.add(entry_index) };
         entry.get()
     }
@@ -81,8 +85,11 @@ impl<T> SlottedCell<T> {
     where
         F: FnOnce(usize) -> Result<T, E>,
     {
-        let mut index = 0;
-        for (bucket_index, bucket) in self.buckets.iter().enumerate() {
+        let mut index = self.unoccupied_index_lower_bound.load(SeqCst);
+        let initial_location = EntryLocation::from_index(index);
+        let mut bucket_index = initial_location.bucket_index;
+
+        for bucket in &self.buckets[bucket_index..] {
             let bucket_len = bucket_len(bucket_index);
             let bucket_ptr = bucket.load(SeqCst);
             let entries = if bucket_ptr.is_null() {
@@ -99,23 +106,45 @@ impl<T> SlottedCell<T> {
                 bucket_ptr
             };
 
-            for entry_index in 0..bucket_len {
+            let start = if bucket_index == initial_location.bucket_index {
+                initial_location.entry_index
+            } else {
+                0
+            };
+            for entry_index in start..bucket_len {
                 let entry = unsafe { &*entries.add(entry_index) };
                 let result = entry
                     .is_occupied
                     .compare_exchange(false, true, SeqCst, SeqCst);
+
+                // Regardless of the result, we now know that the slot is
+                // occupied.
+                let _ = self.unoccupied_index_lower_bound.compare_exchange(
+                    index,
+                    index + 1,
+                    SeqCst,
+                    SeqCst,
+                );
+
                 if result.is_err() {
                     index += 1;
                     continue;
                 }
                 return match entry.init_once(index, f) {
-                    Ok(()) => Ok(Slot { entry }),
+                    Ok(()) => Ok(Slot {
+                        index,
+                        entry,
+                        unoccupied_index_lower_bound: &self.unoccupied_index_lower_bound,
+                    }),
                     Err(e) => {
                         entry.is_occupied.store(false, SeqCst);
+                        self.unoccupied_index_lower_bound.fetch_min(index, SeqCst);
                         Err(e)
                     }
                 };
             }
+
+            bucket_index += 1;
         }
 
         unreachable!("too many slots")
@@ -192,6 +221,22 @@ impl<T> Entry<T> {
     }
 }
 
+struct EntryLocation {
+    bucket_index: usize,
+    entry_index: usize,
+}
+
+impl EntryLocation {
+    fn from_index(index: usize) -> Self {
+        let bucket_index = (usize::BITS - (index + 1).leading_zeros() - 1) as usize;
+        let entry_index = index - (bucket_len(bucket_index) - 1);
+        Self {
+            bucket_index,
+            entry_index,
+        }
+    }
+}
+
 fn alloc_bucket<T>(len: usize) -> *mut Entry<T> {
     let entries = (0..len).map(|_| Entry::<T>::default()).collect();
     Box::into_raw(entries).cast()
@@ -213,7 +258,9 @@ const fn bucket_len(bucket_index: usize) -> usize {
 /// However, the value will not be dropped and will remain in the slot until
 /// the [`SlottedCell`] is dropped.
 pub struct Slot<'a, T> {
+    index: usize,
     entry: &'a Entry<T>,
+    unoccupied_index_lower_bound: &'a AtomicUsize,
 }
 
 impl<T> Slot<'_, T> {
@@ -228,6 +275,8 @@ impl<T> Drop for Slot<'_, T> {
     fn drop(&mut self) {
         let was_occupied = self.entry.is_occupied.swap(false, SeqCst);
         assert!(was_occupied);
+        self.unoccupied_index_lower_bound
+            .fetch_min(self.index, SeqCst);
     }
 }
 
