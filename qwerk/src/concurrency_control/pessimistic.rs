@@ -2,6 +2,7 @@ use super::{ConcurrencyControl, ConcurrencyControlInternal, Precommit, Transacti
 use crate::{
     epoch::EpochParticipant,
     lock::Lock,
+    loom::cell::{Cell, UnsafeCell},
     memory_reclamation::Reclaimer,
     persistence::LogWriter,
     record,
@@ -11,10 +12,7 @@ use crate::{
 };
 use crossbeam_utils::Backoff;
 use scc::hash_index::Entry;
-use std::{
-    cell::{Cell, UnsafeCell},
-    collections::VecDeque,
-};
+use std::collections::VecDeque;
 
 /// Pessimistic concurrency control.
 ///

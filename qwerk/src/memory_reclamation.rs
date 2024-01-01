@@ -1,9 +1,11 @@
 // QSBR is described in:
 // Hart et al. 2006. Making lockless synchronization fast: performance implications of memory reclamation. https://ieeexplore.ieee.org/document/1639261
 
-use crate::slotted_cell::{Slot, SlottedCell};
+use crate::{
+    loom::sync::atomic::{AtomicU64, Ordering::SeqCst},
+    slotted_cell::{Slot, SlottedCell},
+};
 use crossbeam_utils::{Backoff, CachePadded};
-use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
 const OFFLINE_MARKER: u64 = u64::MAX;
 
@@ -161,7 +163,7 @@ impl<T> Drop for EnterGuard<'_, '_, T> {
 #[cfg(test)]
 mod tests {
     use super::MemoryReclamation;
-    use std::sync::{
+    use crate::loom::sync::{
         atomic::{AtomicBool, Ordering::SeqCst},
         Arc, Barrier,
     };

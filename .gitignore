@@ -1,1 +1,10 @@
 /target
+/a
+/b
+/plots
+/*.svg
+/perf.data*
+/base
+/run
+/plot
+/data

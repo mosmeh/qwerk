@@ -1,10 +1,7 @@
 //! A single-producer single-consumer channel for sending a simple signal.
 
-use parking_lot::{Condvar, Mutex};
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use crate::loom::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 pub fn channel() -> (Sender, Receiver) {
     let shared = Arc::new(Shared::default());

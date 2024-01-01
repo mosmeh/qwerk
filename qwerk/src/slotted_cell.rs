@@ -1,6 +1,7 @@
 // Based on the design of thread_local crate
 // https://github.com/Amanieu/thread_local-rs/blob/faa4409fafa3a5b4898c4e5025733f760a3eb665/src/lib.rs
 
+use crate::loom::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering::SeqCst};
 use std::{
     cell::UnsafeCell,
     convert::Infallible,
@@ -8,7 +9,6 @@ use std::{
     marker::PhantomData,
     mem::MaybeUninit,
     ops::Deref,
-    sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering::SeqCst},
 };
 
 const NUM_BUCKETS: usize = (usize::BITS - 1) as usize;

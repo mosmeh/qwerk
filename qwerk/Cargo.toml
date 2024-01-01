@@ -11,6 +11,7 @@ parking_lot = "0.12.1"
 scc = "2.0.7"
 static_assertions = "1.1.0"
 thiserror = "1.0.53"
+loom = "0.7.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.151"
@@ -21,6 +22,9 @@ windows-sys = { version = "0.52.0", features = [
 	"Win32_Storage_FileSystem",
 	"Win32_System_IO",
 ] }
+
+#[target.'cfg(loom)'.dependencies]
+#loom = "0.7.1"
 
 [dev-dependencies]
 anyhow = "1.0.78"

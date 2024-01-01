@@ -3,6 +3,7 @@ use super::{
 };
 use crate::{
     epoch::EpochParticipant,
+    loom::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::SeqCst},
     memory_reclamation::Reclaimer,
     persistence::LogWriter,
     record,
@@ -12,11 +13,7 @@ use crate::{
 };
 use crossbeam_utils::Backoff;
 use scc::hash_index::Entry;
-use std::{
-    cell::OnceCell,
-    collections::VecDeque,
-    sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::SeqCst},
-};
+use std::{cell::OnceCell, collections::VecDeque};
 
 /// Optimistic concurrency control.
 ///

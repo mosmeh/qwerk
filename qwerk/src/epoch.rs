@@ -4,6 +4,13 @@
 // Li et al. 2022. Performant Almost-Latch-Free Data Structures Using Epoch Protection. https://doi.org/10.1145/3533737.3535091
 
 use crate::{
+    loom::{
+        sync::{
+            atomic::{AtomicU32, Ordering::SeqCst},
+            Arc,
+        },
+        thread::{self, JoinHandle},
+    },
     signal_channel,
     slotted_cell::{Slot, SlottedCell},
 };
@@ -11,11 +18,6 @@ use crossbeam_utils::{Backoff, CachePadded};
 use std::{
     fmt::{Display, Formatter},
     str::FromStr,
-    sync::{
-        atomic::{AtomicU32, Ordering::SeqCst},
-        Arc,
-    },
-    thread::JoinHandle,
     time::Duration,
 };
 
@@ -77,7 +79,7 @@ impl EpochFramework {
         let (stop_tx, stop_rx) = signal_channel::channel();
         let epoch_bumper = {
             let shared = shared.clone();
-            std::thread::Builder::new()
+            thread::Builder::new()
                 .name("epoch_bumper".into())
                 .spawn(move || {
                     let mut global_epoch = initial_epoch.0;
@@ -216,13 +218,14 @@ impl Drop for EpochProtector<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::{Epoch, EpochFramework, EpochParticipant};
-    use std::{
+    use crate::loom::{
         sync::{
             atomic::{AtomicBool, Ordering::SeqCst},
             Arc, Barrier,
         },
-        time::Duration,
+        thread,
     };
+    use std::time::Duration;
 
     fn new_epoch_fw() -> EpochFramework {
         EpochFramework::new(Epoch(0), Duration::from_millis(1))
@@ -246,7 +249,7 @@ mod tests {
             let epoch_fw = epoch_fw.clone();
             let synced = synced.clone();
             let barrier = barrier.clone();
-            std::thread::spawn(move || {
+            thread::spawn(move || {
                 let mut participant = epoch_fw.participant();
                 std::mem::forget(participant.acquire());
                 barrier.wait();

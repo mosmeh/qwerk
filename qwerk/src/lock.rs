@@ -1,5 +1,5 @@
+use crate::loom::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use crossbeam_utils::Backoff;
-use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
 // bit [0]:     Whether this lock is dead. If this bit is set, the lock
 //              is considered to be locked forever.
@@ -27,11 +27,11 @@ const READER_FULL: u64 = !(READER - 1);
 pub struct Lock(AtomicU64);
 
 impl Lock {
-    pub const fn new_unlocked() -> Self {
+    pub fn new_unlocked() -> Self {
         Self(AtomicU64::new(0))
     }
 
-    pub const fn new_locked_exclusive() -> Self {
+    pub fn new_locked_exclusive() -> Self {
         Self(AtomicU64::new(WRITER))
     }
 

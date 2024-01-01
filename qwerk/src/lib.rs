@@ -12,6 +12,21 @@ mod small_bytes;
 mod tid;
 mod transaction;
 
+#[allow(unused)]
+mod loom {
+    #[cfg(not(loom))]
+    pub use std::{cell, thread};
+
+    #[cfg(not(loom))]
+    pub mod sync {
+        pub use parking_lot::{Condvar, Mutex};
+        pub use std::sync::{atomic, Arc, Barrier};
+    }
+
+    #[cfg(loom)]
+    pub use loom::{cell, sync, thread};
+}
+
 pub use concurrency_control::{ConcurrencyControl, DefaultProtocol, Optimistic, Pessimistic};
 pub use epoch::Epoch;
 pub use transaction::Transaction;
