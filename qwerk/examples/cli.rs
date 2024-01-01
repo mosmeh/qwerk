@@ -23,7 +23,7 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let db = Database::open(&cli.path)?;
-    let mut worker = db.worker();
+    let mut worker = db.worker()?;
     match cli.command {
         Command::Get { key } => {
             let mut txn = worker.transaction();

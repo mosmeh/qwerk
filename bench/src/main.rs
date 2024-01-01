@@ -164,7 +164,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli, concurrency_control: C) -> Res
             std::thread::spawn(move || -> Result<_> {
                 #[cfg(feature = "affinity")]
                 anyhow::ensure!(core_affinity::set_for_current(core_id));
-                Ok(run_worker(cli, workload, &shared, worker_index))
+                run_worker(cli, workload, &shared, worker_index)
             })
         })
         .collect();
@@ -229,8 +229,8 @@ fn run_worker<C: ConcurrencyControl>(
     workload: Workload,
     shared: &SharedState<C>,
     worker_index: usize,
-) -> Statistics {
-    let mut worker = shared.db.worker();
+) -> Result<Statistics> {
+    let mut worker = shared.db.worker()?;
     let mut rng = match cli.seed {
         Some(seed) => SmallRng::seed_from_u64(seed ^ worker_index as u64),
         None => SmallRng::from_entropy(),
@@ -293,7 +293,7 @@ fn run_worker<C: ConcurrencyControl>(
             Err(_) => stats.num_aborts += 1,
         }
     }
-    stats
+    Ok(stats)
 }
 
 #[derive(Debug, Default, Serialize)]

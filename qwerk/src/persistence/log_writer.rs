@@ -94,14 +94,14 @@ impl Logger {
         })
     }
 
-    pub fn writer(&self) -> LogWriter {
-        LogWriter {
+    pub fn writer(&self) -> std::io::Result<LogWriter> {
+        Ok(LogWriter {
             logger: self,
             channel: self
                 .channels
-                .alloc_with(|index| LogChannel::new(index, self.config.clone()).unwrap()),
+                .try_alloc_with(|index| LogChannel::new(index, self.config.clone()))?,
             flush_req_tx: self.flush_req_tx.clone().unwrap(),
-        }
+        })
     }
 
     /// Makes sure that all the logs written before this call are durable.
