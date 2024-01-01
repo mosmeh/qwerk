@@ -53,11 +53,11 @@ impl Persistence {
         })
     }
 
-    pub fn handle(&self) -> PersistenceHandle<'_> {
-        PersistenceHandle {
-            log_writer: self.logger.writer(),
+    pub fn handle(&self) -> std::io::Result<PersistenceHandle<'_>> {
+        Ok(PersistenceHandle {
+            log_writer: self.logger.writer()?,
             persistent_epoch: &self.persistent_epoch,
-        }
+        })
     }
 
     pub fn durable_epoch(&self) -> Epoch {
