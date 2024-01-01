@@ -1,6 +1,7 @@
-use anyhow::Result;
 use clap::{arg, Parser, ValueEnum};
-use qwerk::{ConcurrencyControl, Database, DatabaseOptions, Optimistic, Pessimistic};
+use qwerk::{
+    ConcurrencyControl, Database, DatabaseOptions, Error, Optimistic, Pessimistic, Worker,
+};
 use rand::{distributions::WeightedIndex, prelude::Distribution, rngs::SmallRng, Rng, SeedableRng};
 use serde::Serialize;
 use std::{
@@ -48,7 +49,7 @@ struct Cli {
     #[arg(long, default_value_t = 0.5)]
     theta: f64,
 
-    #[arg(long, value_enum, default_value_t = Protocol::Pessimistic)]
+    #[arg(long, value_enum, default_value_t = Protocol::Optimistic)]
     protocol: Protocol,
 
     #[arg(long, value_enum, default_value_t = WorkloadKind::A)]
@@ -63,8 +64,8 @@ struct Cli {
 
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize)]
 enum Protocol {
-    Pessimistic,
     Optimistic,
+    Pessimistic,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize)]
@@ -77,7 +78,7 @@ enum WorkloadKind {
     Variable,
 }
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.protocol {
         Protocol::Optimistic => run_benchmark(cli, Optimistic::new()),
@@ -85,7 +86,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn run_benchmark<C: ConcurrencyControl>(cli: Cli, concurrency_control: C) -> Result<()> {
+fn run_benchmark<C: ConcurrencyControl>(cli: Cli, concurrency_control: C) -> anyhow::Result<()> {
     let workload = match cli.workload {
         WorkloadKind::A => Workload {
             read_proportion: 50,
@@ -161,7 +162,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli, concurrency_control: C) -> Res
             let shared = shared.clone();
             let cli = cli.clone();
             let workload = workload.clone();
-            std::thread::spawn(move || -> Result<_> {
+            std::thread::spawn(move || {
                 #[cfg(feature = "affinity")]
                 anyhow::ensure!(core_affinity::set_for_current(core_id));
                 run_worker(cli, workload, &shared, worker_index)
@@ -169,7 +170,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli, concurrency_control: C) -> Res
         })
         .collect();
 
-    eprintln!("Populating database");
+    eprintln!("Preparing");
     shared.barrier.wait();
     shared.db.flush()?;
 
@@ -229,8 +230,21 @@ fn run_worker<C: ConcurrencyControl>(
     workload: Workload,
     shared: &SharedState<C>,
     worker_index: usize,
-) -> Result<Statistics> {
+) -> anyhow::Result<Statistics> {
     let mut worker = shared.db.worker()?;
+
+    let payload = vec![0; cli.payload];
+
+    let from = cli.records * worker_index as u64 / cli.threads as u64;
+    let to = cli.records * (worker_index as u64 + 1) / cli.threads as u64;
+    for i in from..to {
+        let key = i.to_ne_bytes();
+        let mut txn = worker.transaction();
+        txn.insert(key, &payload).unwrap();
+        txn.set_wait_for_durability(false);
+        txn.commit().unwrap();
+    }
+
     let mut rng = match cli.seed {
         Some(seed) => SmallRng::seed_from_u64(seed ^ worker_index as u64),
         None => SmallRng::from_entropy(),
@@ -244,58 +258,63 @@ fn run_worker<C: ConcurrencyControl>(
     let has_insert = workload.insert_proportion > 0;
     let mut generator =
         KeyGenerator::new(&mut rng, &shared.latest, cli.records, cli.theta, has_insert);
-    let mut stats = Statistics::default();
-    let payload = vec![0; cli.payload];
     let op_dist = WeightedIndex::new(op_weights).unwrap();
-    let from = cli.records * worker_index as u64 / cli.threads as u64;
-    let to = cli.records * (worker_index as u64 + 1) / cli.threads as u64;
-    for i in from..to {
-        let key = i.to_ne_bytes();
-        let mut txn = worker.transaction();
-        txn.insert(key, &payload).unwrap();
-        txn.set_wait_for_durability(false);
-        txn.commit().unwrap();
-    }
-    shared.barrier.wait(); // Signal that the database is populated
+    let mut keys = Vec::with_capacity(cli.working_set);
+    let mut stats = Statistics::default();
+
+    shared.barrier.wait(); // Signal that the worker is ready
 
     shared.barrier.wait(); // Signal that the benchmark will start
     while shared.is_running.load(Ordering::SeqCst) {
         let op = OPERATIONS[op_dist.sample(&mut rng)];
-        let mut txn = worker.transaction();
         for _ in 0..cli.working_set {
-            let i = if op == Operation::Insert {
+            keys.push(if op == Operation::Insert {
                 generator.insert()
             } else {
                 generator.zipfian(&mut rng)
-            };
-            let key = i.to_ne_bytes();
-
-            use std::hint::black_box;
-            match op {
-                Operation::Read => {
-                    let _ = black_box(txn.get(black_box(key)));
-                }
-                Operation::Update | Operation::Insert => {
-                    let _ = black_box(txn.insert(black_box(key), black_box(&payload)));
-                }
-                Operation::ReadModifyWrite => {
-                    let key = black_box(key);
-                    let _ = black_box(txn.get(key));
-                    let _ = black_box(txn.insert(key, black_box(&payload)));
-                }
-            }
+            });
         }
-        txn.set_wait_for_durability(false);
-        let result = txn.commit();
-        if !shared.is_running.load(Ordering::Relaxed) {
-            break;
-        }
+        let result = run_transaction(&mut worker, op, &keys, &payload);
         match result {
-            Ok(_) => stats.num_commits += 1,
-            Err(_) => stats.num_aborts += 1,
+            Ok(()) => stats.num_commits += 1,
+            Err(Error::TransactionNotSerializable | Error::TooManyTransactions) => {
+                stats.num_aborts += 1
+            }
+            Err(e) => return Err(e.into()),
         }
+        keys.clear();
     }
     Ok(stats)
+}
+
+fn run_transaction<C: ConcurrencyControl>(
+    worker: &mut Worker<C>,
+    op: Operation,
+    keys: &[u64],
+    payload: &[u8],
+) -> qwerk::Result<()> {
+    use std::hint::black_box;
+
+    let mut txn = worker.transaction();
+    for key in keys {
+        let key = key.to_ne_bytes();
+        match op {
+            Operation::Read => {
+                black_box(txn.get(black_box(key))?);
+            }
+            Operation::Update | Operation::Insert => {
+                txn.insert(black_box(key), black_box(payload))?
+            }
+            Operation::ReadModifyWrite => {
+                let key = black_box(key);
+                black_box(txn.get(key)?);
+                txn.insert(key, black_box(payload))?;
+            }
+        }
+    }
+    txn.set_wait_for_durability(false);
+    txn.commit()?;
+    Ok(())
 }
 
 #[derive(Debug, Default, Serialize)]
