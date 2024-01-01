@@ -40,27 +40,29 @@ fn main() -> Result<()> {
     txn.insert(b"key2", b"bar")?;
     txn.abort();
 
-    // When committing multiple transactions in a batch, you can make use of
-    // `precommit` that commits the transaction but does not wait for
-    // durability. In this way, writes to the disk can be batched and
-    // the performance is improved.
+    // When committing multiple transactions in a batch, you can choose not to
+    // wait for durability for each transaction. In this way, writes to the disk
+    // can be batched and the performance is improved.
 
     let mut txn = worker.transaction();
     assert!(txn.get(b"key1")?.is_none());
     txn.insert(b"key3", b"baz")?;
-    let commit_epoch1 = txn.precommit()?;
+    txn.set_wait_for_durability(false);
+    let commit_epoch1 = txn.commit()?;
 
     let mut txn = worker.transaction();
     assert_eq!(txn.get(b"key3")?, Some(b"baz".as_slice()));
     txn.insert(b"key4", b"qux")?;
-    let commit_epoch2 = txn.precommit()?;
+    txn.set_wait_for_durability(false);
+    let commit_epoch2 = txn.commit()?;
 
     assert!(commit_epoch1 <= commit_epoch2);
 
-    // Transactions committed with `precommit` are made durable periodically
-    // by background threads or when `flush` is called.
+    // Even when you don't wait for durability, the transaction is still
+    // made durable periodically by background threads or when `flush` is
+    // called.
     // You can check if the transaction became durable by comparing
-    // the commit epoch returned by `precommit` and the durable epoch of
+    // the commit epoch returned by `commit` and the durable epoch of
     // the database.
 
     let durable_epoch = db.flush()?;

@@ -1,12 +1,12 @@
 use crate::{
-    concurrency_control::{Precommit, TransactionExecutor},
-    persistence::PersistenceHandle,
-    ConcurrencyControl, DefaultProtocol, Epoch, Error, Result, Worker,
+    concurrency_control::TransactionExecutor, persistence::PersistenceHandle, ConcurrencyControl,
+    DefaultProtocol, Epoch, Error, Result, Worker,
 };
 
 pub struct Transaction<'db, 'worker, C: ConcurrencyControl = DefaultProtocol> {
     worker: &'worker mut Worker<'db, C>,
     is_active: bool,
+    wait_for_durability: bool,
 }
 
 impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
@@ -14,6 +14,7 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
         Self {
             worker,
             is_active: true,
+            wait_for_durability: true,
         }
     }
 
@@ -80,8 +81,7 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
         result
     }
 
-    /// Commits the transaction, and waits until the commit is durable if
-    /// the transaction contains any writes.
+    /// Commits the transaction.
     ///
     /// Even if the transaction consists only of [`get`]s, the transaction
     /// must be committed and must succeed.
@@ -93,47 +93,27 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
     ///
     /// [`get`]: #method.get
     pub fn commit(mut self) -> Result<Epoch> {
-        let Some(persistence) = &self.worker.persistence else {
-            return self.precommit();
-        };
-        let persistent_epoch = persistence.persistent_epoch();
-        let precommit = self.do_precommit()?;
-        let commit_epoch = precommit.epoch();
-        // Even if the flush fails, we are already past the point of no return,
-        // so we can't abort the transaction.
-        if precommit.flush_log_entry()? {
-            persistent_epoch.wait_for(commit_epoch);
-        }
-        Ok(commit_epoch)
-    }
-
-    /// Commits the transaction, but does not wait for durability.
-    /// This is useful when multiple transactions are committed in a batch.
-    ///
-    /// To make sure the transaction is durable, wait for the returned
-    /// commit epoch to be equal to or greater than [`Database::durable_epoch`].
-    ///
-    /// For other remarks, see [`commit`].
-    ///
-    /// [`Database::durable_epoch`]: crate::Database#method.durable_epoch
-    /// [`commit`]: #method.commit
-    pub fn precommit(mut self) -> Result<Epoch> {
-        Ok(self.do_precommit()?.epoch())
-    }
-
-    fn do_precommit(&mut self) -> Result<Precommit> {
         if !self.is_active {
             return Err(Error::TransactionAlreadyAborted);
         }
-        let log_writer = self
-            .worker
-            .persistence
-            .as_ref()
-            .map(PersistenceHandle::log_writer);
-        let precommit = self.worker.txn_executor.precommit(log_writer)?; // `do_abort` is called in `drop` on `Err`
+
+        let persistence = self.worker.persistence.as_ref();
+        let log_writer = persistence.map(PersistenceHandle::log_writer);
+
+        // `do_abort` is called in `drop` on `Err`
+        let mut precommit = self.worker.txn_executor.precommit(log_writer)?;
         self.worker.txn_executor.end_transaction();
         self.is_active = false;
-        Ok(precommit)
+
+        let commit_epoch = precommit.epoch();
+
+        // Even if the flush fails, we are already past the point of no return,
+        // so we can't abort the transaction.
+        if self.wait_for_durability && precommit.flush_log_entry()? {
+            persistence.unwrap().wait_for_durability(commit_epoch);
+        }
+
+        Ok(commit_epoch)
     }
 
     /// Aborts the transaction.
@@ -150,6 +130,20 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
         self.worker.txn_executor.abort();
         self.worker.txn_executor.end_transaction();
         self.is_active = false;
+    }
+
+    /// Sets whether to wait until the transaction becomes durable when
+    /// committing the transaction.
+    /// Defaults to `true`.
+    ///
+    /// Setting this to `false` is useful when multiple transactions are
+    /// committed in a batch. To make sure that the transactions are durable in
+    /// this case, perform a normal commit on the last transaction in the batch
+    /// or call [`Database::flush`].
+    ///
+    /// [`Database::flush`]: crate::Database#method.flush
+    pub fn set_wait_for_durability(&mut self, yes: bool) {
+        self.wait_for_durability = yes;
     }
 }
 
