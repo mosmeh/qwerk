@@ -14,7 +14,6 @@ use crossbeam_utils::Backoff;
 use scc::hash_index::Entry;
 use std::{
     cell::OnceCell,
-    cmp::Ordering,
     collections::VecDeque,
     sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::SeqCst},
 };
@@ -54,15 +53,13 @@ impl ConcurrencyControlInternal for Optimistic {
                     .lock_if_present()
                     .expect("the record must be present");
                 assert!(!record_tid.has_flags());
-                match record_tid.cmp(&tid) {
-                    Ordering::Less => {
-                        let (buf_ptr, len) = value.into_raw_parts();
-                        record.buf_ptr.store(buf_ptr, SeqCst);
-                        record.len.store(len, SeqCst);
-                        record.tid.store(tid.0, SeqCst); // unlock
-                    }
-                    Ordering::Equal => unreachable!(),
-                    Ordering::Greater => record.unlock(),
+                if tid > record_tid {
+                    let (buf_ptr, len) = value.into_raw_parts();
+                    record.buf_ptr.store(buf_ptr, SeqCst);
+                    record.len.store(len, SeqCst);
+                    record.tid.store(tid.0, SeqCst); // unlock
+                } else {
+                    record.unlock();
                 }
             }
             Entry::Vacant(entry) => {
@@ -484,8 +481,11 @@ impl Executor<'_> {
 impl Drop for Executor<'_> {
     fn drop(&mut self) {
         let backoff = Backoff::new();
-        while !self.removal_queue.is_empty() {
+        loop {
             self.process_removal_queue();
+            if self.removal_queue.is_empty() {
+                break;
+            }
             backoff.snooze();
         }
     }

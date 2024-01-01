@@ -1,6 +1,12 @@
 use std::io::{Read, Write};
 
 pub trait ReadBytesExt: Read {
+    fn read_u32(&mut self) -> std::io::Result<u32> {
+        let mut buf = [0; std::mem::size_of::<u32>()];
+        self.read_exact(&mut buf)?;
+        Ok(u32::from_le_bytes(buf))
+    }
+
     fn read_u64(&mut self) -> std::io::Result<u64> {
         let mut buf = [0; std::mem::size_of::<u64>()];
         self.read_exact(&mut buf)?;
@@ -33,6 +39,10 @@ pub trait ReadBytesExt: Read {
 impl<R: Read> ReadBytesExt for R {}
 
 pub trait WriteBytesExt: Write {
+    fn write_u32(&mut self, n: u32) -> std::io::Result<()> {
+        self.write_all(&n.to_le_bytes())
+    }
+
     fn write_u64(&mut self, n: u64) -> std::io::Result<()> {
         self.write_all(&n.to_le_bytes())
     }
@@ -89,11 +99,13 @@ mod tests {
         use super::{ReadBytesExt, WriteBytesExt};
 
         let mut buf = Vec::new();
-        buf.write_u64(42).unwrap();
+        buf.write_u32(12).unwrap();
+        buf.write_u64(34).unwrap();
         buf.write_bytes(b"foo").unwrap();
 
         let mut buf = buf.as_slice();
-        assert_eq!(buf.read_u64().unwrap(), 42);
+        assert_eq!(buf.read_u32().unwrap(), 12);
+        assert_eq!(buf.read_u64().unwrap(), 34);
         assert_eq!(buf.read_bytes().unwrap(), b"foo");
     }
 
