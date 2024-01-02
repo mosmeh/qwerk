@@ -1,10 +1,12 @@
 mod checkpoint_reader;
 mod checkpoint_writer;
+mod io_monitor;
 mod log_reader;
 mod log_writer;
 mod recovery;
 
 pub use checkpoint_writer::Config as CheckpointerConfig;
+pub use io_monitor::IoMonitor;
 pub use log_writer::{Config as LoggerConfig, LogEntry, LogWriter, PersistentEpoch};
 pub use recovery::recover;
 
@@ -35,7 +37,7 @@ impl Persistence {
         })
     }
 
-    pub fn handle(&self) -> std::io::Result<PersistenceHandle<'_>> {
+    pub fn handle(&self) -> Result<PersistenceHandle<'_>> {
         Ok(PersistenceHandle {
             log_writer: self.logger.writer()?,
             persistent_epoch: &self.persistent_epoch,
@@ -46,7 +48,7 @@ impl Persistence {
         self.persistent_epoch.get()
     }
 
-    pub fn flush(&self) -> std::io::Result<Epoch> {
+    pub fn flush(&self) -> Result<Epoch> {
         self.logger.flush()
     }
 }
@@ -57,7 +59,7 @@ pub struct PersistenceHandle<'a> {
 }
 
 impl PersistenceHandle<'_> {
-    pub fn log_writer(&self) -> LogWriterLock {
+    pub fn log_writer(&self) -> Result<LogWriterLock> {
         self.log_writer.lock()
     }
 

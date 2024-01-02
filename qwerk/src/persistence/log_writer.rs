@@ -1,4 +1,8 @@
-use super::{fsync_dir, LogFileId, WriteBytesCounter};
+use super::{
+    fsync_dir,
+    io_monitor::{IoMonitor, IoSubMonitor},
+    LogFileId, WriteBytesCounter,
+};
 use crate::{
     bytes_ext::{ByteVecExt, BytesExt},
     epoch::{Epoch, EpochFramework},
@@ -25,6 +29,7 @@ pub struct Config {
     pub dir: PathBuf,
     pub epoch_fw: Arc<EpochFramework>,
     pub persistent_epoch: Arc<PersistentEpoch>,
+    pub io_monitor: Arc<IoMonitor>,
     pub flushing_threads: NonZeroUsize,
     pub preallocated_buffer_size: usize,
     pub buffers_per_writer: NonZeroUsize,
@@ -56,21 +61,7 @@ impl Logger {
             .map(|_| {
                 let channels = channels.clone();
                 let flush_req_rx = flush_req_rx.clone();
-                std::thread::spawn(move || {
-                    while let Ok(req) = flush_req_rx.recv() {
-                        let channel = channels
-                            .get(req.channel_index)
-                            .expect("invalid channel index");
-                        if channel.flush_queue.is_empty() {
-                            // The buffers have already been flushed when
-                            // handling previous flush requests,
-                            // or are being flushed by other flushers.
-                            continue;
-                        }
-                        let mut state = channel.flush_state.lock();
-                        channel.flush(&mut state).unwrap(); // TODO: Handle errors.
-                    }
-                })
+                std::thread::spawn(move || run_flusher(&channels, flush_req_rx))
             })
             .collect();
 
@@ -96,12 +87,14 @@ impl Logger {
         })
     }
 
-    pub fn writer(&self) -> std::io::Result<LogWriter> {
+    pub fn writer(&self) -> Result<LogWriter> {
         Ok(LogWriter {
             logger: self,
-            channel: self
-                .channels
-                .try_alloc_with(|index| LogChannel::new(index, self.config.clone()))?,
+            channel: self.channels.try_alloc_with(|index| {
+                self.config
+                    .io_monitor
+                    .do_foreground(|| LogChannel::new(index, self.config.clone()))
+            })?,
             flush_req_tx: self.flush_req_tx.clone().unwrap(),
         })
     }
@@ -109,26 +102,28 @@ impl Logger {
     /// Makes sure that all the logs written before this call are durable.
     ///
     /// Returns the durable epoch after the flush.
-    pub fn flush(&self) -> std::io::Result<Epoch> {
-        self.config.epoch_fw.sync();
-        for channel in self.channels.iter() {
-            let mut write_state = channel.write_state.lock();
-            if let Some(buf) = write_state.take_queueable_buf() {
-                channel.queue(buf);
+    pub fn flush(&self) -> Result<Epoch> {
+        self.config.io_monitor.do_foreground(|| {
+            self.config.epoch_fw.sync();
+            for channel in self.channels.iter() {
+                let mut write_state = channel.write_state.lock();
+                if let Some(buf) = write_state.take_queueable_buf() {
+                    channel.queue(buf);
+                }
+
+                let mut flush_state = channel.flush_state.lock();
+                channel.flush(&mut flush_state)?;
+                assert!(channel.flush_queue.is_empty());
+
+                // The next log buffer that will be queued to the channel will
+                // have an epoch >= global_epoch.
+                let global_epoch = self.config.epoch_fw.global_epoch();
+                channel
+                    .durable_epoch
+                    .fetch_max(global_epoch.decrement().0, SeqCst);
             }
-
-            let mut flush_state = channel.flush_state.lock();
-            channel.flush(&mut flush_state)?;
-            assert!(channel.flush_queue.is_empty());
-
-            // The next log buffer that will be queued to the channel will
-            // have an epoch >= global_epoch.
-            let global_epoch = self.config.epoch_fw.global_epoch();
-            channel
-                .durable_epoch
-                .fetch_max(global_epoch.decrement().0, SeqCst);
-        }
-        self.config.persistent_epoch.update(&self.channels)
+            self.config.persistent_epoch.update(&self.channels)
+        })
     }
 }
 
@@ -141,6 +136,28 @@ impl Drop for Logger {
             flusher.join().unwrap();
         }
         let _ = self.flush();
+    }
+}
+
+fn run_flusher(
+    channels: &SlottedCell<LogChannel>,
+    flush_req_rx: crossbeam_channel::Receiver<FlushRequest>,
+) {
+    while let Ok(req) = flush_req_rx.recv() {
+        let channel = channels
+            .get(req.channel_index)
+            .expect("invalid channel index");
+        if channel.flush_queue.is_empty() {
+            // The buffers have already been flushed when handling previous
+            // flush requests, or are being flushed by other flushers.
+            continue;
+        }
+        if !channel
+            .io_monitor
+            .do_background(|| channel.flush(&mut channel.flush_state.lock()))
+        {
+            return;
+        }
     }
 }
 
@@ -190,7 +207,12 @@ fn run_daemon(
         }
 
         // 3. Update and persist the global durable epoch.
-        config.persistent_epoch.update(channels).unwrap(); // TODO: Handle errors.
+        if !config
+            .io_monitor
+            .do_background(|| config.persistent_epoch.update(channels).map(|_| ()))
+        {
+            return;
+        }
     }
 }
 
@@ -315,17 +337,20 @@ pub struct LogWriter<'a> {
 }
 
 impl LogWriter<'_> {
-    pub fn lock(&self) -> LogWriterLock {
+    pub fn lock(&self) -> Result<LogWriterLock> {
+        // Perform a dummy operation to report I/O errors early.
+        self.channel.io_monitor.do_foreground(|| Ok(()))?;
+
         let mut state = self.channel.write_state.lock();
         if state.current_buf.is_none() {
             let bytes = state.free_bufs_rx.recv().unwrap();
             assert!(bytes.is_empty());
             state.current_buf = Some(LogBuf::new(bytes));
         }
-        LogWriterLock {
+        Ok(LogWriterLock {
             writer: self,
             buf: MutexGuard::map(state, |state| &mut state.current_buf),
-        }
+        })
     }
 }
 
@@ -380,19 +405,22 @@ impl LogEntry<'_> {
     /// Finishes writing the log entry, and persists it to the disk.
     ///
     /// Returns the global durable epoch after the flush.
-    pub fn flush(mut self) -> std::io::Result<Epoch> {
-        let mut buf = self.buf.take().unwrap();
-        buf.bytes.set_u64(self.num_records_offset, self.num_records);
+    pub fn flush(mut self) -> Result<Epoch> {
+        self.writer.channel.io_monitor.do_foreground(|| {
+            let mut buf = self.buf.take().unwrap();
+            buf.bytes.set_u64(self.num_records_offset, self.num_records);
 
-        let channel = &*self.writer.channel;
-        channel.queue(buf);
+            let channel = &*self.writer.channel;
+            channel.queue(buf);
 
-        let mut flush_state = channel.flush_state.lock();
-        channel.flush(&mut flush_state)?;
-        assert!(channel.flush_queue.is_empty());
+            let mut flush_state = channel.flush_state.lock();
+            channel.flush(&mut flush_state)?;
+            assert!(channel.flush_queue.is_empty());
 
-        let logger = self.writer.logger;
-        logger.config.persistent_epoch.update(&logger.channels)
+            let logger = self.writer.logger;
+            let durable_epoch = logger.config.persistent_epoch.update(&logger.channels)?;
+            Ok(durable_epoch)
+        })
     }
 }
 
@@ -441,6 +469,7 @@ pub struct LogChannel {
     config: Arc<Config>,
     flush_queue: ArrayQueue<LogBuf>,
     durable_epoch: AtomicU32,
+    io_monitor: IoSubMonitor,
 
     /// This mutex also guards push to `flush_queue`.
     write_state: Mutex<WriteState>,
@@ -478,11 +507,14 @@ impl LogChannel {
                 .unwrap();
         }
 
+        let io_monitor = IoSubMonitor::new(config.io_monitor.clone());
+
         Ok(Self {
             index,
             config,
             flush_queue,
             durable_epoch: durable_epoch.0.into(),
+            io_monitor,
             write_state: Mutex::new(WriteState {
                 current_buf: Default::default(),
                 free_bufs_rx,
@@ -507,11 +539,9 @@ impl LogChannel {
     }
 
     fn request_flush(&self, flush_req_tx: &crossbeam_channel::Sender<FlushRequest>) {
-        flush_req_tx
-            .send(FlushRequest {
-                channel_index: self.index,
-            })
-            .unwrap();
+        let _ = flush_req_tx.send(FlushRequest {
+            channel_index: self.index,
+        });
     }
 
     fn flush(&self, state: &mut FlushState) -> std::io::Result<()> {
