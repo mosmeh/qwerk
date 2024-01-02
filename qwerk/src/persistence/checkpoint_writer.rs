@@ -8,7 +8,10 @@
 //! by themselves, and should be combined with the log files to recover
 //! the consistent state of the database.
 
-use super::{fsync_dir, CheckpointFileId, FileId, LogFileId, PersistentEpoch, WriteBytesCounter};
+use super::{
+    fsync_dir, io_monitor::IoMonitor, CheckpointFileId, FileId, LogFileId, PersistentEpoch,
+    WriteBytesCounter,
+};
 use crate::{
     bytes_ext::WriteBytesExt,
     epoch::EpochFramework,
@@ -32,6 +35,7 @@ pub struct Config<R: Record> {
     pub epoch_fw: Arc<EpochFramework>,
     pub reclamation: Arc<MemoryReclamation>,
     pub persistent_epoch: Arc<PersistentEpoch>,
+    pub io_monitor: Arc<IoMonitor>,
     pub interval: Duration,
     pub max_file_size: usize,
 }
@@ -47,26 +51,7 @@ impl Checkpointer {
         let thread = {
             std::thread::Builder::new()
                 .name("checkpointer".into())
-                .spawn(move || {
-                    let mut reclaimer = config.reclamation.reclaimer();
-                    let mut last_epoch = None;
-                    for _ in stop_rx.tick(config.interval) {
-                        let mut epoch = config.epoch_fw.global_epoch();
-                        while last_epoch.map_or(false, |last| epoch <= last) {
-                            epoch = config.epoch_fw.sync();
-                        }
-                        fuzzy_checkpoint(
-                            &config.dir,
-                            &config.index,
-                            &config.persistent_epoch,
-                            &mut reclaimer,
-                            epoch,
-                            config.max_file_size,
-                        )
-                        .unwrap(); // TODO: Handle errors.
-                        last_epoch = Some(epoch);
-                    }
-                })
+                .spawn(move || run_checkpointer(config, stop_rx))
                 .unwrap()
         };
         Self {
@@ -80,6 +65,30 @@ impl Drop for Checkpointer {
     fn drop(&mut self) {
         self.stop_tx.send();
         self.thread.take().unwrap().join().unwrap();
+    }
+}
+
+fn run_checkpointer<R: Record>(config: Config<R>, stop_rx: signal_channel::Receiver) {
+    let mut reclaimer = config.reclamation.reclaimer();
+    let mut last_epoch = None;
+    for _ in stop_rx.tick(config.interval) {
+        let mut epoch = config.epoch_fw.global_epoch();
+        while last_epoch.map_or(false, |last| epoch <= last) {
+            epoch = config.epoch_fw.sync();
+        }
+        if !config.io_monitor.do_background(|| {
+            fuzzy_checkpoint(
+                &config.dir,
+                &config.index,
+                &config.persistent_epoch,
+                &mut reclaimer,
+                epoch,
+                config.max_file_size,
+            )
+        }) {
+            return;
+        }
+        last_epoch = Some(epoch);
     }
 }
 

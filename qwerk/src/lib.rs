@@ -21,7 +21,7 @@ use epoch::EpochFramework;
 use file_lock::FileLock;
 use memory_reclamation::MemoryReclamation;
 use persistence::{
-    CheckpointerConfig, LoggerConfig, Persistence, PersistenceHandle, PersistentEpoch,
+    CheckpointerConfig, IoMonitor, LoggerConfig, Persistence, PersistenceHandle, PersistentEpoch,
 };
 use scc::HashIndex;
 use shared::Shared;
@@ -32,24 +32,28 @@ use std::{num::NonZeroUsize, path::Path, sync::Arc, time::Duration};
 #[non_exhaustive]
 pub enum Error {
     /// Database is already open.
-    #[error("database is already open")]
+    #[error("Database is already open")]
     DatabaseAlreadyOpen,
 
     /// Database is corrupted or tried to open a non-database path.
-    #[error("database is corrupted or tried to open a non-database path")]
+    #[error("Database is corrupted or tried to open a non-database path")]
     DatabaseCorrupted,
 
     /// Serialization of a transaction failed.
-    #[error("serilization of the transaction failed")]
+    #[error("Serilization of the transaction failed")]
     TransactionNotSerializable,
 
     /// Too many transactions in a single epoch.
-    #[error("too many transactions in a single epoch")]
+    #[error("Too many transactions in a single epoch")]
     TooManyTransactions,
 
     /// Attempted to perform an operation on an aborted transaction.
-    #[error("attempted to perform an operation on the aborted transaction")]
+    #[error("Attempted to perform an operation on the aborted transaction")]
     TransactionAlreadyAborted,
+
+    /// Persistence failed due to I/O errors.
+    #[error("Persistence failed due to I/O errors. Reopen the database after fixing the errors.")]
+    PersistenceFailed,
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -129,6 +133,7 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
         let epoch_fw = Arc::new(EpochFramework::new(initial_epoch, self.epoch_duration));
         let index = Arc::new(index);
         let reclamation = Arc::new(MemoryReclamation::new(self.gc_threshold));
+        let io_monitor = Arc::new(IoMonitor::default());
 
         let persistence = Persistence::new(
             lock,
@@ -137,6 +142,7 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
                 dir: dir.clone(),
                 epoch_fw: epoch_fw.clone(),
                 persistent_epoch: persistent_epoch.clone(),
+                io_monitor: io_monitor.clone(),
                 flushing_threads: self.logging_threads,
                 preallocated_buffer_size: self.log_buffer_size,
                 buffers_per_writer: self.log_buffers_per_worker,
@@ -148,6 +154,7 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
                 epoch_fw: epoch_fw.clone(),
                 reclamation: reclamation.clone(),
                 persistent_epoch,
+                io_monitor,
                 interval: self.checkpoint_interval,
                 max_file_size: self.max_file_size,
             },
@@ -281,7 +288,7 @@ impl<C: ConcurrencyControl> Database<C> {
     ///
     /// You usually should spawn one [`Worker`] per thread, and reuse the
     /// [`Worker`] for multiple transactions.
-    pub fn worker(&self) -> std::io::Result<Worker<C>> {
+    pub fn worker(&self) -> Result<Worker<C>> {
         let epoch_participant = self.epoch_fw.participant();
         let reclaimer = self.reclamation.reclaimer();
         Ok(Worker {
@@ -316,7 +323,7 @@ impl<C: ConcurrencyControl> Database<C> {
     /// This operation is a no-op if the database is temporary.
     ///
     /// Returns the durable epoch after the flush.
-    pub fn flush(&self) -> std::io::Result<Epoch> {
+    pub fn flush(&self) -> Result<Epoch> {
         Ok(match &self.persistence {
             Some(p) => p.flush()?,
             None => Epoch(0),

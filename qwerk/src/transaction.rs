@@ -107,7 +107,7 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
         let txn_executor = &mut self.worker.txn_executor;
         let commit_tid = match &self.worker.persistence {
             Some(persistence) if self.has_writes => {
-                let log_writer = persistence.lock_log_writer();
+                let log_writer = persistence.lock_log_writer()?;
                 let commit_tid = txn_executor.validate()?;
                 let mut log_entry = log_writer.insert_entry(commit_tid);
                 txn_executor.log(&mut log_entry);
