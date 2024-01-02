@@ -1,7 +1,8 @@
 use super::{
+    file_id::LogFileId,
     fsync_dir,
     io_monitor::{IoMonitor, IoSubMonitor},
-    LogFileId, WriteBytesCounter,
+    WriteBytesCounter,
 };
 use crate::{
     bytes_ext::{ByteVecExt, BytesExt},

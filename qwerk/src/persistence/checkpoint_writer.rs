@@ -9,8 +9,10 @@
 //! the consistent state of the database.
 
 use super::{
-    fsync_dir, io_monitor::IoMonitor, CheckpointFileId, FileId, LogFileId, PersistentEpoch,
-    WriteBytesCounter,
+    file_id::{CheckpointFileId, FileId, LogFileId},
+    fsync_dir,
+    io_monitor::IoMonitor,
+    PersistentEpoch, WriteBytesCounter,
 };
 use crate::{
     bytes_ext::WriteBytesExt,
