@@ -1,6 +1,9 @@
 use super::{
-    checkpoint_reader::CheckpointReader, checkpoint_writer::non_fuzzy_checkpoint,
-    log_reader::LogReader, CheckpointFileId, FileId, LogFileId, PersistentEpoch,
+    checkpoint_reader::CheckpointReader,
+    checkpoint_writer::non_fuzzy_checkpoint,
+    file_id::{CheckpointFileId, FileId, LogFileId},
+    log_reader::LogReader,
+    PersistentEpoch,
 };
 use crate::{record::Record, ConcurrencyControl, Epoch, Index, Result};
 use crossbeam_queue::ArrayQueue;
