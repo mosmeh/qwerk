@@ -1,10 +1,8 @@
-use super::{
-    ConcurrencyControl, ConcurrencyControlInternal, Precommit, Shared, TransactionExecutor,
-};
+use super::{ConcurrencyControl, ConcurrencyControlInternal, Shared, TransactionExecutor};
 use crate::{
     epoch::EpochParticipant,
     memory_reclamation::Reclaimer,
-    persistence::LogWriter,
+    persistence::LogEntry,
     record,
     small_bytes::SmallBytes,
     tid::{Tid, TidGenerator},
@@ -302,18 +300,7 @@ impl TransactionExecutor for Executor<'_> {
         Ok(())
     }
 
-    fn precommit<'a>(&mut self, log_writer: Option<&'a LogWriter<'a>>) -> Result<Precommit<'a>> {
-        let reserved_log_capacity = match log_writer {
-            Some(writer) if !self.write_set.is_empty() => {
-                let mut reserver = writer.reserver();
-                for item in &self.write_set {
-                    reserver.reserve_write(&item.key, item.value.as_deref());
-                }
-                Some(reserver.finish())
-            }
-            _ => None,
-        };
-
+    fn validate(&mut self) -> Result<Tid> {
         // Phase 1
 
         // The stability of the sort doesn't matter because the keys are unique.
@@ -382,17 +369,20 @@ impl TransactionExecutor for Executor<'_> {
             tid_set.add(tid);
         }
 
-        let commit_tid = tid_set
+        tid_set
             .generate_tid(commit_epoch)
-            .ok_or(Error::TooManyTransactions)?;
+            .ok_or(Error::TooManyTransactions)
+    }
 
+    fn log(&self, log_entry: &mut LogEntry<'_>) {
+        for item in &self.write_set {
+            log_entry.write(item.key.as_ref(), item.value.as_deref());
+        }
+    }
+
+    fn precommit(&mut self, commit_tid: Tid) {
         // Phase 3: write phase
-        let mut log_entry = reserved_log_capacity.map(|capacity| capacity.insert(commit_tid));
         for item in self.write_set.drain(..) {
-            if let Some(log_entry) = &mut log_entry {
-                log_entry.write(item.key.as_ref(), item.value.as_deref());
-            }
-
             let record_ptr = item
                 .target
                 .get()
@@ -416,11 +406,6 @@ impl TransactionExecutor for Executor<'_> {
                 self.removal_queue.push_back((item.key, commit_tid));
             }
         }
-
-        Ok(Precommit {
-            epoch: commit_epoch,
-            log_entry,
-        })
     }
 
     fn abort(&mut self) {

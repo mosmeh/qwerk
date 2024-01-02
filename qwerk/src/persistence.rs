@@ -10,7 +10,7 @@ pub use recovery::recover;
 
 use crate::{file_lock::FileLock, record::Record, Epoch, Result};
 use checkpoint_writer::Checkpointer;
-use log_writer::Logger;
+use log_writer::{LogWriterLock, Logger};
 use std::{io::Write, path::Path, str::FromStr, sync::Arc};
 
 pub struct Persistence {
@@ -56,9 +56,9 @@ pub struct PersistenceHandle<'a> {
     persistent_epoch: &'a PersistentEpoch,
 }
 
-impl<'a> PersistenceHandle<'a> {
-    pub fn log_writer(&self) -> &LogWriter<'a> {
-        &self.log_writer
+impl PersistenceHandle<'_> {
+    pub fn log_writer(&self) -> LogWriterLock {
+        self.log_writer.lock()
     }
 
     pub fn wait_for_durability(&self, epoch: Epoch) {
