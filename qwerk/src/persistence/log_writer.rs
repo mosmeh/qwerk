@@ -315,76 +315,28 @@ pub struct LogWriter<'a> {
 }
 
 impl LogWriter<'_> {
-    pub const fn reserver(&self) -> CapacityReserver {
-        CapacityReserver {
-            writer: self,
-            num_bytes: std::mem::size_of::<u64>() * 2, // tid and num_records
-        }
-    }
-
-    fn queue_and_request_flush(&self, buf: LogBuf) {
-        self.channel.queue(buf);
-        self.channel.request_flush(&self.flush_req_tx);
-    }
-}
-
-pub struct CapacityReserver<'a> {
-    writer: &'a LogWriter<'a>,
-    num_bytes: usize,
-}
-
-impl<'a> CapacityReserver<'a> {
-    /// Reserves capacity for a key-value pair.
-    pub fn reserve_write(&mut self, key: &[u8], value: Option<&[u8]>) {
-        self.num_bytes += key.len() + std::mem::size_of::<u64>() * 2; // key, key.len(), and value.len()
-        if let Some(value) = value {
-            self.num_bytes += value.len();
-        }
-    }
-
-    pub fn finish(self) -> ReservedCapacity<'a> {
-        let size = self.writer.channel.config.preallocated_buffer_size;
-        let mut state = self.writer.channel.write_state.lock();
-        if state
-            .current_buf
-            .as_ref()
-            .map(|buf| !buf.bytes.is_empty() && buf.bytes.len() + self.num_bytes > size)
-            .unwrap_or_default()
-        {
-            self.writer
-                .queue_and_request_flush(state.current_buf.take().unwrap());
-        }
-
+    pub fn lock(&self) -> LogWriterLock {
+        let mut state = self.channel.write_state.lock();
         if state.current_buf.is_none() {
             let bytes = state.free_bufs_rx.recv().unwrap();
             assert!(bytes.is_empty());
             state.current_buf = Some(LogBuf::new(bytes));
         }
-
-        // The buffer can exceed the preallocated size if the single transaction
-        // is too large.
-        state
-            .current_buf
-            .as_mut()
-            .unwrap()
-            .bytes
-            .reserve(self.num_bytes);
-
-        ReservedCapacity {
-            writer: self.writer,
+        LogWriterLock {
+            writer: self,
             buf: MutexGuard::map(state, |state| &mut state.current_buf),
         }
     }
 }
 
-pub struct ReservedCapacity<'a> {
+/// A locked reference to the `LogWriter`.
+pub struct LogWriterLock<'a> {
     writer: &'a LogWriter<'a>,
     buf: MappedMutexGuard<'a, Option<LogBuf>>,
 }
 
-impl<'a> ReservedCapacity<'a> {
-    /// Inserts a new log entry into the reserved capacity.
-    pub fn insert(mut self, tid: Tid) -> LogEntry<'a> {
+impl<'a> LogWriterLock<'a> {
+    pub fn insert_entry(mut self, tid: Tid) -> LogEntry<'a> {
         let buf = self.buf.as_mut().unwrap();
 
         let epoch = tid.epoch();
@@ -415,7 +367,9 @@ pub struct LogEntry<'a> {
 }
 
 impl LogEntry<'_> {
-    /// Writes a key-value pair to the log.
+    /// Writes a key-value pair to the log entry.
+    ///
+    /// `value` of `None` means tombstone.
     pub fn write(&mut self, key: &[u8], value: Option<&[u8]>) {
         let bytes = &mut self.buf.as_mut().unwrap().bytes;
         bytes.write_bytes(key);
@@ -449,9 +403,11 @@ impl Drop for LogEntry<'_> {
             return;
         };
         buf.bytes.set_u64(self.num_records_offset, self.num_records);
-        if buf.bytes.len() >= self.writer.channel.config.preallocated_buffer_size {
-            self.writer
-                .queue_and_request_flush(self.buf.take().unwrap());
+
+        let channel = &*self.writer.channel;
+        if buf.bytes.len() >= channel.config.preallocated_buffer_size {
+            channel.queue(self.buf.take().unwrap());
+            channel.request_flush(&self.writer.flush_req_tx);
         }
     }
 }

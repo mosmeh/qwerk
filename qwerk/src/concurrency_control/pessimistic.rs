@@ -1,9 +1,9 @@
-use super::{ConcurrencyControl, ConcurrencyControlInternal, Precommit, TransactionExecutor};
+use super::{ConcurrencyControl, ConcurrencyControlInternal, TransactionExecutor};
 use crate::{
     epoch::EpochParticipant,
     lock::Lock,
     memory_reclamation::Reclaimer,
-    persistence::LogWriter,
+    persistence::LogEntry,
     record,
     small_bytes::SmallBytes,
     tid::{Tid, TidGenerator},
@@ -262,43 +262,34 @@ impl TransactionExecutor for Executor<'_> {
         Ok(())
     }
 
-    fn precommit<'a>(&mut self, log_writer: Option<&'a LogWriter<'a>>) -> Result<Precommit<'a>> {
+    fn validate(&mut self) -> Result<Tid> {
+        // Validation always succeeds because the records are already locked.
+        // Just generate a new TID.
         let mut tid_set = self.tid_generator.transaction();
-        let mut has_write = false;
         for item in &self.rw_set {
             let record = unsafe { item.record_ptr.as_ref() };
             tid_set.add(record.tid.get());
-            if let ItemKind::Write { .. } = item.kind {
-                has_write = true;
-            }
         }
-
-        let reserved_log_capacity = match log_writer {
-            Some(writer) if has_write => {
-                let mut reserver = writer.reserver();
-                for item in &self.rw_set {
-                    if let ItemKind::Write { .. } = item.kind {
-                        let record = unsafe { item.record_ptr.as_ref() };
-                        reserver.reserve_write(&item.key, unsafe { record.get() });
-                    }
-                }
-                Some(reserver.finish())
-            }
-            _ => None,
-        };
-
         let commit_epoch = self.epoch_participant.force_refresh();
-        let commit_tid = tid_set
+        tid_set
             .generate_tid(commit_epoch)
-            .ok_or(Error::TooManyTransactions)?;
+            .ok_or(Error::TooManyTransactions)
+    }
 
-        let mut log_entry = reserved_log_capacity.map(|capacity| capacity.insert(commit_tid));
-        for item in self.rw_set.drain(..) {
-            let record = unsafe { item.record_ptr.as_ref() };
-            let value = unsafe { record.get() };
-            if let (Some(log_entry), ItemKind::Write { .. }) = (&mut log_entry, &item.kind) {
+    fn log(&self, log_entry: &mut LogEntry<'_>) {
+        for item in &self.rw_set {
+            if let ItemKind::Write { .. } = &item.kind {
+                let record = unsafe { item.record_ptr.as_ref() };
+                let value = unsafe { record.get() };
                 log_entry.write(&item.key, value);
             }
+        }
+    }
+
+    fn precommit(&mut self, commit_tid: Tid) {
+        for item in self.rw_set.drain(..) {
+            let record = unsafe { item.record_ptr.as_ref() };
+            let is_tombstone = unsafe { record.get() }.is_none();
             match item.kind {
                 ItemKind::Read if item.was_vacant => {
                     record.lock.kill();
@@ -310,16 +301,12 @@ impl TransactionExecutor for Executor<'_> {
                 ItemKind::Write { .. } => {
                     record.tid.set(commit_tid);
                     record.lock.force_unlock_write();
-                    if value.is_none() {
+                    if is_tombstone {
                         self.removal_queue.push_back((item.key, commit_tid));
                     }
                 }
             }
         }
-        Ok(Precommit {
-            log_entry,
-            epoch: commit_epoch,
-        })
     }
 
     fn abort(&mut self) {

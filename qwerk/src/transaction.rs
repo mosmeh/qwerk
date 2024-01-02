@@ -1,11 +1,12 @@
 use crate::{
-    concurrency_control::TransactionExecutor, persistence::PersistenceHandle, ConcurrencyControl,
-    DefaultProtocol, Epoch, Error, Result, Worker,
+    concurrency_control::TransactionExecutor, ConcurrencyControl, DefaultProtocol, Epoch, Error,
+    Result, Worker,
 };
 
 pub struct Transaction<'db, 'worker, C: ConcurrencyControl = DefaultProtocol> {
     worker: &'worker mut Worker<'db, C>,
     is_active: bool,
+    has_writes: bool,
     wait_for_durability: bool,
 }
 
@@ -14,6 +15,7 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
         Self {
             worker,
             is_active: true,
+            has_writes: false,
             wait_for_durability: true,
         }
     }
@@ -75,8 +77,9 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
             .worker
             .txn_executor
             .write(key.as_ref(), value.as_ref().map(AsRef::as_ref));
-        if result.is_err() {
-            self.do_abort();
+        match result {
+            Ok(()) => self.has_writes = true,
+            Err(_) => self.do_abort(),
         }
         result
     }
@@ -97,36 +100,53 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
             return Err(Error::TransactionAlreadyAborted);
         }
 
-        let persistence = self.worker.persistence.as_ref();
-        let log_writer = persistence.map(PersistenceHandle::log_writer);
+        // This method takes an ownership of self, so if it returns an error
+        // while is_active is true, self is dropped and the transaction is
+        // aborted.
 
-        // `do_abort` is called in `drop` on `Err`
-        let mut precommit = self.worker.txn_executor.precommit(log_writer)?;
-        self.worker.txn_executor.end_transaction();
-        self.is_active = false;
+        let txn_executor = &mut self.worker.txn_executor;
+        let commit_tid = match &self.worker.persistence {
+            Some(persistence) if self.has_writes => {
+                let log_writer = persistence.lock_log_writer();
+                let commit_tid = txn_executor.validate()?;
+                let mut log_entry = log_writer.insert_entry(commit_tid);
+                txn_executor.log(&mut log_entry);
+                txn_executor.precommit(commit_tid);
+                txn_executor.end_transaction();
+                self.is_active = false;
+                if self.wait_for_durability {
+                    log_entry.flush()?;
+                }
+                commit_tid
+            }
+            _ => {
+                let commit_tid = txn_executor.validate()?;
+                txn_executor.precommit(commit_tid);
+                txn_executor.end_transaction();
+                self.is_active = false;
+                commit_tid
+            }
+        };
 
-        let commit_epoch = precommit.epoch();
-
-        // Even if the flush fails, we are already past the point of no return,
-        // so we can't abort the transaction.
-        if self.wait_for_durability && precommit.flush_log_entry()? {
-            persistence.unwrap().wait_for_durability(commit_epoch);
+        let commit_epoch = commit_tid.epoch();
+        match &self.worker.persistence {
+            Some(persistence) if self.wait_for_durability => {
+                persistence.wait_for_durability(commit_epoch);
+            }
+            _ => {}
         }
-
         Ok(commit_epoch)
     }
 
     /// Aborts the transaction.
     ///
     /// All the changes made in the transaction are rolled back.
-    pub fn abort(mut self) {
-        self.do_abort();
+    pub fn abort(self) {
+        // Drop self.
     }
 
     fn do_abort(&mut self) {
-        if !self.is_active {
-            return;
-        }
+        assert!(self.is_active);
         self.worker.txn_executor.abort();
         self.worker.txn_executor.end_transaction();
         self.is_active = false;
@@ -152,6 +172,8 @@ impl<C: ConcurrencyControl> Drop for Transaction<'_, '_, C> {
     ///
     /// [`abort`]: #method.abort
     fn drop(&mut self) {
-        self.do_abort();
+        if self.is_active {
+            self.do_abort();
+        }
     }
 }
