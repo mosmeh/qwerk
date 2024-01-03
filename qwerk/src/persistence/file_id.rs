@@ -106,6 +106,13 @@ pub enum LogFileId {
 impl LogFileId {
     const FILE_NAME_PREFIX: &'static str = "log_";
 
+    pub fn max_epoch(&self) -> Option<Epoch> {
+        match self {
+            Self::Archive { max_epoch, .. } => Some(*max_epoch),
+            Self::Current { .. } => None,
+        }
+    }
+
     pub fn file_name(&self) -> String {
         match self {
             Self::Archive {
@@ -154,9 +161,11 @@ mod tests {
             max_epoch: Epoch(456),
         };
         assert_eq!(id.file_name(), "log_123_456");
+        assert_eq!(id.max_epoch(), Some(Epoch(456)));
 
         let id = LogFileId::Current { channel_index: 123 };
         assert_eq!(id.file_name(), "log_123_current");
+        assert!(id.max_epoch().is_none());
     }
 
     #[test]

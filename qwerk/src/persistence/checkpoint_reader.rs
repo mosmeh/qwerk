@@ -1,4 +1,5 @@
-use crate::{bytes_ext::ReadBytesExt, small_bytes::SmallBytes, tid::Tid, Error, Result};
+use super::file_id::CheckpointFileId;
+use crate::{bytes_ext::ReadBytesExt, small_bytes::SmallBytes, tid::Tid, Epoch, Error, Result};
 use std::{
     fs::File,
     io::{BufReader, Read, Seek, SeekFrom},
@@ -12,13 +13,14 @@ pub struct CheckpointEntry {
 
 pub struct CheckpointReader {
     file: BufReader<File>,
+    start_epoch: Epoch,
     num_entries: u64,
     num_remaining_entries: u64,
 }
 
 impl CheckpointReader {
-    pub fn new(path: &Path) -> std::io::Result<Self> {
-        let mut file = File::open(path)?;
+    pub fn new(dir: &Path, file_id: &CheckpointFileId) -> std::io::Result<Self> {
+        let mut file = File::open(dir.join(file_id.file_name()))?;
         file.seek(SeekFrom::End(
             -i64::try_from(std::mem::size_of::<u64>()).unwrap(),
         ))?;
@@ -26,6 +28,7 @@ impl CheckpointReader {
         file.seek(SeekFrom::Start(0))?;
         Ok(Self {
             file: BufReader::new(file),
+            start_epoch: file_id.start_epoch(),
             num_entries,
             num_remaining_entries: num_entries,
         })
@@ -48,15 +51,20 @@ impl CheckpointReader {
 
         let key = self.file.read_bytes()?;
         let value = self.file.read_bytes()?.into();
+
         let tid = Tid(self.file.read_u64()?);
-        let entry = CheckpointEntry {
-            key: key.into(),
-            value,
-            tid,
-        };
+        if tid.epoch() >= self.start_epoch {
+            return Err(Error::DatabaseCorrupted);
+        }
 
         if let Some(n) = self.num_remaining_entries.checked_sub(1) {
             self.num_remaining_entries = n;
+
+            let entry = CheckpointEntry {
+                key: key.into(),
+                value,
+                tid,
+            };
             Ok(Some(entry))
         } else {
             Err(Error::DatabaseCorrupted)

@@ -7,12 +7,7 @@ use super::{
 };
 use crate::{record::Record, ConcurrencyControl, Epoch, Index, Result};
 use crossbeam_queue::ArrayQueue;
-use std::{
-    cmp::Ordering,
-    num::NonZeroUsize,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{cmp::Ordering, num::NonZeroUsize, path::Path, sync::Arc};
 
 /// Recovers the database from the given directory.
 ///
@@ -35,18 +30,15 @@ pub fn recover<C: ConcurrencyControl>(
             continue;
         };
         match file_id {
-            FileId::Checkpoint(id) => match id {
-                CheckpointFileId::Split { start_epoch, .. } => {
-                    checkpoint_files.push((start_epoch, path));
-                }
-                CheckpointFileId::Last { start_epoch } => {
-                    checkpoint_files.push((start_epoch, path));
+            FileId::Checkpoint(id) => {
+                if let CheckpointFileId::Last { start_epoch } = id {
                     if latest_checkpoint_epoch.map_or(true, |latest| start_epoch > latest) {
                         latest_checkpoint_epoch = Some(start_epoch);
                     }
                 }
-            },
-            FileId::Log(id) => log_files.push((id, path)),
+                checkpoint_files.push(id);
+            }
+            FileId::Log(id) => log_files.push(id),
             FileId::Temporary => (),
         }
     }
@@ -54,16 +46,16 @@ pub fn recover<C: ConcurrencyControl>(
     let index = Arc::new(Index::new());
     if let Some(checkpoint_epoch) = latest_checkpoint_epoch {
         assert!(!checkpoint_files.is_empty());
-        let paths = ArrayQueue::new(checkpoint_files.len());
-        for (start_epoch, path) in checkpoint_files {
-            if start_epoch == checkpoint_epoch {
-                paths.push(path).unwrap();
+        let files_to_load = ArrayQueue::new(checkpoint_files.len());
+        for id in checkpoint_files {
+            if id.start_epoch() == checkpoint_epoch {
+                files_to_load.push(id).unwrap();
             }
         }
-        assert!(!paths.is_empty());
+        assert!(!files_to_load.is_empty());
         let index = index.clone();
-        load_files(paths, num_threads, move |path| {
-            let reader = CheckpointReader::new(path)?;
+        load_files(files_to_load, num_threads, move |id| {
+            let reader = CheckpointReader::new(dir, &id)?;
             for entry in reader {
                 let entry = entry?;
                 C::load_record(&index, entry.key, Some(entry.value), entry.tid);
@@ -73,7 +65,7 @@ pub fn recover<C: ConcurrencyControl>(
     }
 
     if let Some(checkpoint_epoch) = latest_checkpoint_epoch {
-        log_files.retain(|(id, _)| match id {
+        log_files.retain(|id| match id {
             LogFileId::Archive { max_epoch, .. } => *max_epoch >= checkpoint_epoch,
             LogFileId::Current { .. } => true,
         });
@@ -82,7 +74,7 @@ pub fn recover<C: ConcurrencyControl>(
         // Sort log files by max epoch in descending order to load the most
         // recent log files first. By doing so, we can avoid loading log entries
         // that are overwritten by later log entries.
-        log_files.sort_unstable_by(|(a, _), (b, _)| match (a, b) {
+        log_files.sort_unstable_by(|a, b| match (a, b) {
             (LogFileId::Archive { max_epoch: a, .. }, LogFileId::Archive { max_epoch: b, .. }) => {
                 b.cmp(a)
             }
@@ -90,25 +82,25 @@ pub fn recover<C: ConcurrencyControl>(
             (LogFileId::Current { .. }, LogFileId::Archive { .. }) => Ordering::Less,
             (LogFileId::Current { .. }, LogFileId::Current { .. }) => Ordering::Equal,
         });
-        let paths = ArrayQueue::new(log_files.len());
-        for (_, path) in log_files {
-            paths.push(path).unwrap();
+        let files_to_load = ArrayQueue::new(log_files.len());
+        for id in log_files {
+            files_to_load.push(id).unwrap();
         }
         let index = index.clone();
-        load_files(paths, num_threads, move |path| {
-            let reader = LogReader::new(path)?;
-            for txn in reader {
-                let txn = txn?;
-                let txn_epoch = txn.tid.epoch();
-                if txn_epoch > durable_epoch {
+        load_files(files_to_load, num_threads, move |id| {
+            let reader = LogReader::new(dir, &id)?;
+            for entry in reader {
+                let entry = entry?;
+                let epoch = entry.tid.epoch();
+                if epoch > durable_epoch {
                     continue;
                 }
                 match latest_checkpoint_epoch {
-                    Some(checkpoint_epoch) if txn_epoch < checkpoint_epoch => continue,
+                    Some(checkpoint_epoch) if epoch < checkpoint_epoch => continue,
                     _ => (),
                 }
-                for entry in txn.entries {
-                    C::load_record(&index, entry.key, entry.value, txn.tid);
+                for record in entry.records {
+                    C::load_record(&index, record.key, record.value, entry.tid);
                 }
             }
             Ok(())
@@ -152,27 +144,31 @@ pub fn recover<C: ConcurrencyControl>(
     Ok((index, new_checkpoint_epoch.increment()))
 }
 
-fn load_files<F>(paths: ArrayQueue<PathBuf>, num_threads: NonZeroUsize, load: F) -> Result<()>
+fn load_files<T, F>(files: ArrayQueue<T>, num_threads: NonZeroUsize, load: F) -> Result<()>
 where
-    F: Fn(&Path) -> Result<()> + Send + Clone + 'static,
+    T: Send,
+    F: Fn(T) -> Result<()> + Send + Clone,
 {
-    let num_threads = num_threads.get().min(paths.len());
-    let queue = Arc::new(paths);
-    let threads: Vec<_> = (0..num_threads)
-        .map(|_| {
-            let queue = queue.clone();
-            let load = load.clone();
-            std::thread::spawn(move || -> Result<()> {
-                while let Some(path) = queue.pop() {
-                    load(&path)?;
-                }
-                Ok(())
+    let num_threads = num_threads.get().min(files.len());
+    let queue = Arc::new(files);
+    std::thread::scope(|s| -> Result<()> {
+        let threads: Vec<_> = (0..num_threads)
+            .map(|_| {
+                let queue = queue.clone();
+                let load = load.clone();
+                s.spawn(move || -> Result<()> {
+                    while let Some(file) = queue.pop() {
+                        load(file)?;
+                    }
+                    Ok(())
+                })
             })
-        })
-        .collect();
-    for thread in threads {
-        thread.join().unwrap()?;
-    }
+            .collect();
+        for thread in threads {
+            thread.join().unwrap()?;
+        }
+        Ok(())
+    })?;
     assert!(queue.is_empty());
     Ok(())
 }
