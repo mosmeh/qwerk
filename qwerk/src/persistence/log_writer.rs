@@ -489,10 +489,7 @@ impl LogChannel {
             }
             .file_name(),
         );
-        let file = File::options()
-            .write(true)
-            .create_new(true)
-            .open(&file_path)?;
+        let file = File::options().append(true).create(true).open(&file_path)?;
 
         let flush_queue = ArrayQueue::new(config.buffers_per_writer.get());
 
@@ -646,7 +643,7 @@ impl LogChannel {
             state.last_archived_epoch = max_epoch;
             state.file = Some(WriteBytesCounter::new(
                 File::options()
-                    .write(true)
+                    .append(true)
                     .create_new(true)
                     .open(&state.file_path)?,
             ));

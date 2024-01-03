@@ -13,6 +13,7 @@ pub use recovery::recover;
 
 use crate::{file_lock::FileLock, record::Record, Epoch, Result};
 use checkpoint_writer::Checkpointer;
+use file_id::FileId;
 use log_writer::{LogWriterLock, Logger};
 use std::{io::Write, path::Path, sync::Arc};
 
@@ -121,5 +122,23 @@ fn fsync_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(not(target_os = "windows"))]
     std::fs::File::open(dir)?.sync_data()?;
 
+    Ok(())
+}
+
+/// Removes all files in the given directory that match the given predicate.
+fn remove_files<F>(dir: &Path, predicate: F) -> std::io::Result<()>
+where
+    F: Fn(FileId) -> bool,
+{
+    assert!(dir.is_dir());
+    for dir_entry in std::fs::read_dir(dir)? {
+        let path = dir_entry?.path();
+        let Some(id) = FileId::from_path(&path) else {
+            continue;
+        };
+        if predicate(id) {
+            std::fs::remove_file(path)?;
+        }
+    }
     Ok(())
 }
