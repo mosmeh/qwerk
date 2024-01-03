@@ -12,7 +12,7 @@ use super::{
     file_id::{CheckpointFileId, FileId, LogFileId},
     fsync_dir,
     io_monitor::IoMonitor,
-    PersistentEpoch, WriteBytesCounter,
+    remove_files, PersistentEpoch, WriteBytesCounter,
 };
 use crate::{
     bytes_ext::WriteBytesExt,
@@ -220,20 +220,11 @@ fn checkpoint<R: Record>(
     fsync_dir(dir)?;
 
     // Remove old checkpoint and log files.
-    for dir_entry in std::fs::read_dir(dir)? {
-        let path = dir_entry?.path();
-        let Some(file_id) = FileId::from_path(&path) else {
-            continue;
-        };
-        let should_remove = match file_id {
-            FileId::Checkpoint(id) if id.start_epoch() < start_epoch => true,
-            FileId::Log(LogFileId::Archive { max_epoch, .. }) if max_epoch < start_epoch => true,
-            _ => false,
-        };
-        if should_remove {
-            std::fs::remove_file(path)?;
-        }
-    }
+    remove_files(dir, |id| match id {
+        FileId::Checkpoint(id) if id.start_epoch() < start_epoch => true,
+        FileId::Log(LogFileId::Archive { max_epoch, .. }) if max_epoch < start_epoch => true,
+        _ => false,
+    })?;
 
     Ok(())
 }

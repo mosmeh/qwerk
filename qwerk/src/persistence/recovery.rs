@@ -3,7 +3,7 @@ use super::{
     checkpoint_writer::non_fuzzy_checkpoint,
     file_id::{CheckpointFileId, FileId, LogFileId},
     log_reader::LogReader,
-    PersistentEpoch,
+    remove_files, PersistentEpoch,
 };
 use crate::{record::Record, ConcurrencyControl, Epoch, Index, Result};
 use crossbeam_queue::ArrayQueue;
@@ -20,7 +20,8 @@ pub fn recover<C: ConcurrencyControl>(
     max_file_size: usize,
 ) -> Result<(Index<C::Record>, Epoch)> {
     let durable_epoch = persistent_epoch.get();
-    let mut latest_checkpoint_epoch = None;
+    let mut new_epoch = durable_epoch;
+    let mut checkpoint_epoch = None;
     let mut checkpoint_files = Vec::new();
     let mut log_files = Vec::new();
 
@@ -31,20 +32,29 @@ pub fn recover<C: ConcurrencyControl>(
         };
         match file_id {
             FileId::Checkpoint(id) => {
+                new_epoch = new_epoch.max(id.start_epoch());
                 if let CheckpointFileId::Last { start_epoch } = id {
-                    if latest_checkpoint_epoch.map_or(true, |latest| start_epoch > latest) {
-                        latest_checkpoint_epoch = Some(start_epoch);
+                    if checkpoint_epoch.map_or(true, |latest| start_epoch > latest) {
+                        checkpoint_epoch = Some(start_epoch);
                     }
                 }
                 checkpoint_files.push(id);
             }
-            FileId::Log(id) => log_files.push(id),
+            FileId::Log(id) => {
+                if let Some(epoch) = id.max_epoch() {
+                    new_epoch = new_epoch.max(epoch);
+                }
+                log_files.push(id);
+            }
             FileId::Temporary => (),
         }
     }
 
+    // Decide a new epoch that is greater than any existing epochs.
+    new_epoch = new_epoch.increment();
+
     let index = Arc::new(Index::new());
-    if let Some(checkpoint_epoch) = latest_checkpoint_epoch {
+    if let Some(checkpoint_epoch) = checkpoint_epoch {
         assert!(!checkpoint_files.is_empty());
         let files_to_load = ArrayQueue::new(checkpoint_files.len());
         for id in checkpoint_files {
@@ -53,6 +63,7 @@ pub fn recover<C: ConcurrencyControl>(
             }
         }
         assert!(!files_to_load.is_empty());
+
         let index = index.clone();
         load_files(files_to_load, num_threads, move |id| {
             let reader = CheckpointReader::new(dir, &id)?;
@@ -62,14 +73,17 @@ pub fn recover<C: ConcurrencyControl>(
             }
             Ok(())
         })?;
-    }
 
-    if let Some(checkpoint_epoch) = latest_checkpoint_epoch {
         log_files.retain(|id| match id {
             LogFileId::Archive { max_epoch, .. } => *max_epoch >= checkpoint_epoch,
             LogFileId::Current { .. } => true,
         });
     }
+
+    let has_archive_log_files = log_files
+        .iter()
+        .any(|id| matches!(id, LogFileId::Archive { .. }));
+
     if !log_files.is_empty() {
         // Sort log files by max epoch in descending order to load the most
         // recent log files first. By doing so, we can avoid loading log entries
@@ -95,7 +109,7 @@ pub fn recover<C: ConcurrencyControl>(
                 if epoch > durable_epoch {
                     continue;
                 }
-                match latest_checkpoint_epoch {
+                match checkpoint_epoch {
                     Some(checkpoint_epoch) if epoch < checkpoint_epoch => continue,
                     _ => (),
                 }
@@ -119,29 +133,38 @@ pub fn recover<C: ConcurrencyControl>(
         !is_tombstone
     });
 
-    // Decide a new checkpoint epoch that is distinct from the existing ones.
-    let mut new_checkpoint_epoch = durable_epoch.increment();
-    if let Some(checkpoint_epoch) = latest_checkpoint_epoch {
-        new_checkpoint_epoch = new_checkpoint_epoch.max(checkpoint_epoch.increment());
-    }
-    let index = non_fuzzy_checkpoint(dir, index, new_checkpoint_epoch, max_file_size)?;
+    // If there are archive log files, create a new checkpoint to compact
+    // the log files. If there are only "current" log files, we resume appending
+    // to them for faster recovery.
+    if has_archive_log_files {
+        let index = non_fuzzy_checkpoint(dir, index, new_epoch, max_file_size)?;
 
-    // Remove old checkpoint files, log files, and unfinished temporary files.
-    for dir_entry in std::fs::read_dir(dir)? {
-        let path = dir_entry?.path();
-        let Some(file_id) = FileId::from_path(&path) else {
-            continue;
-        };
-        let should_remove = match file_id {
-            FileId::Checkpoint(id) => id.start_epoch() < new_checkpoint_epoch,
+        // Remove old checkpoint files, log files, and unfinished temporary files.
+        remove_files(dir, |id| match id {
+            FileId::Checkpoint(id) => {
+                assert!(id.start_epoch() <= new_epoch);
+                id.start_epoch() < new_epoch
+            }
             FileId::Log(_) | FileId::Temporary => true,
-        };
-        if should_remove {
-            std::fs::remove_file(path)?;
-        }
-    }
+        })?;
 
-    Ok((index, new_checkpoint_epoch.increment()))
+        Ok((index, new_epoch.increment()))
+    } else {
+        remove_files(dir, |id| match id {
+            FileId::Checkpoint(id) => {
+                // Remove old and incomplete checkpoints.
+                checkpoint_epoch.map_or(true, |checkpoint_epoch| {
+                    id.start_epoch() != checkpoint_epoch
+                })
+            }
+            FileId::Log(id) => {
+                assert!(matches!(id, LogFileId::Current { .. }));
+                false
+            }
+            FileId::Temporary => true,
+        })?;
+        Ok((index, new_epoch))
+    }
 }
 
 fn load_files<T, F>(files: ArrayQueue<T>, num_threads: NonZeroUsize, load: F) -> Result<()>
