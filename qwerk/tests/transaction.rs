@@ -1,4 +1,4 @@
-use qwerk::{ConcurrencyControl, DatabaseOptions, Optimistic, Pessimistic};
+use qwerk::{ConcurrencyControl, Database, Optimistic, Pessimistic};
 
 #[test]
 fn pessimistic() {
@@ -11,7 +11,9 @@ fn optimistic() {
 }
 
 fn test<C: ConcurrencyControl>(concurrency_control: C) {
-    let db = DatabaseOptions::with_concurrency_control(concurrency_control).open_temporary();
+    let db = Database::options()
+        .concurrency_control(concurrency_control)
+        .open_temporary();
 
     let mut worker = db.worker().unwrap();
 

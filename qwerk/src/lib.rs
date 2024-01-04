@@ -98,15 +98,6 @@ impl DatabaseOptions<DefaultProtocol> {
 }
 
 impl<C: ConcurrencyControl> DatabaseOptions<C> {
-    /// Creates a new options object with the given concurrency control
-    /// protocol.
-    pub fn with_concurrency_control(concurrency_control: C) -> Self {
-        Self {
-            concurrency_control,
-            ..Default::default()
-        }
-    }
-
     /// Opens a database at the given path, creating it if it does not exist.
     pub fn open<P: AsRef<Path>>(self, path: P) -> Result<Database<C>> {
         let dir = path.as_ref();
@@ -177,6 +168,25 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
             epoch_fw: EpochFramework::new(Epoch(0), self.epoch_duration).into(),
             reclamation: MemoryReclamation::new(self.gc_threshold).into(),
             persistence: None,
+        }
+    }
+
+    /// Concurrency control protocol. Defaults to [`DefaultProtocol`].
+    #[must_use]
+    pub fn concurrency_control<T: ConcurrencyControl>(
+        self,
+        concurrency_control: T,
+    ) -> DatabaseOptions<T> {
+        DatabaseOptions {
+            concurrency_control,
+            epoch_duration: self.epoch_duration,
+            gc_threshold: self.gc_threshold,
+            recovery_threads: self.recovery_threads,
+            logging_threads: self.logging_threads,
+            checkpoint_interval: self.checkpoint_interval,
+            log_buffer_size: self.log_buffer_size,
+            log_buffers_per_worker: self.log_buffers_per_worker,
+            max_file_size: self.max_file_size,
         }
     }
 
@@ -280,6 +290,11 @@ impl Database<DefaultProtocol> {
     /// Opens a temporary database that is not persisted to the disk.
     pub fn open_temporary() -> Self {
         DatabaseOptions::new().open_temporary()
+    }
+
+    /// Returns a new [`DatabaseOptions`] with default values.
+    pub fn options() -> DatabaseOptions {
+        Default::default()
     }
 }
 
