@@ -1,7 +1,5 @@
 use clap::{arg, Parser, ValueEnum};
-use qwerk::{
-    ConcurrencyControl, Database, DatabaseOptions, Error, Optimistic, Pessimistic, Worker,
-};
+use qwerk::{ConcurrencyControl, Database, Error, Optimistic, Pessimistic, Worker};
 use rand::{distributions::WeightedIndex, prelude::Distribution, rngs::SmallRng, Rng, SeedableRng};
 use serde::Serialize;
 use std::{
@@ -129,7 +127,8 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli, concurrency_control: C) -> any
         }
     };
 
-    let options = DatabaseOptions::with_concurrency_control(concurrency_control)
+    let options = Database::options()
+        .concurrency_control(concurrency_control)
         .logging_threads(cli.logging_threads)
         .checkpoint_interval(Duration::from_millis(cli.checkpoint_interval));
     let shared = Arc::new(SharedState {

@@ -6,9 +6,11 @@ fn main() -> Result<()> {
 
     // By default, optimistic concurrency control is used.
     // Alternatively, you can use pessimistic concurrency control with:
-    // let db = DatabaseOptions::with_concurrency_control(Pessimistic::new()).open("data")?;
+    // let db = Database::options()
+    //     .concurrency_control(Pessimistic::new())
+    //     .open("data")?;
 
-    // Optimistic concurrency control is better for read-heavy workloads.
+    // Optimistic concurrency control is better for read-heavy workloads,
     // while pessimistic concurrency control is better for write-heavy
     // workloads.
 
