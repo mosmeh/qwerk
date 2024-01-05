@@ -60,6 +60,10 @@ impl Receiver {
             .wait_while_until(&mut guard, |signaled| !*signaled, deadline)
             .timed_out()
     }
+
+    pub fn try_recv(&self) -> bool {
+        *self.shared.mutex.lock()
+    }
 }
 
 pub struct Tick {

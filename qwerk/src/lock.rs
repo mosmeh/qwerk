@@ -1,5 +1,7 @@
-use crossbeam_utils::Backoff;
-use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+use crate::primitive::{
+    sync::atomic::{AtomicU64, Ordering::SeqCst},
+    Backoff,
+};
 
 // bit [0]:     Whether this lock is dead. If this bit is set, the lock
 //              is considered to be locked forever.
@@ -145,10 +147,10 @@ impl Lock {
         assert_eq!(prev, WRITER, "lock is not write-locked");
     }
 
-    /// Kill the lock.
+    /// Puts the lock into a "dead" state.
     ///
-    /// The lock will enter a "dead" state, where it is considered to be
-    /// permanently locked.
+    /// The lock will be considered to be locked forever. Any attempt to acquire
+    /// the lock will fail.
     ///
     /// # Panics
     /// Panics if the lock is already dead or not write-locked.

@@ -5,6 +5,7 @@ mod file_lock;
 mod lock;
 mod memory_reclamation;
 mod persistence;
+mod primitive;
 mod shared;
 mod signal_channel;
 mod slotted_cell;

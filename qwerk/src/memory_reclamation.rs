@@ -1,9 +1,14 @@
 // QSBR is described in:
 // Hart et al. 2006. Making lockless synchronization fast: performance implications of memory reclamation. https://ieeexplore.ieee.org/document/1639261
 
-use crate::slotted_cell::{Slot, SlottedCell};
-use crossbeam_utils::{Backoff, CachePadded};
-use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+use crate::{
+    primitive::{
+        sync::atomic::{AtomicU64, Ordering::SeqCst},
+        Backoff,
+    },
+    slotted_cell::{Slot, SlottedCell},
+};
+use crossbeam_utils::CachePadded;
 
 const OFFLINE_MARKER: u64 = u64::MAX;
 

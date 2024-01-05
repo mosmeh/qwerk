@@ -4,18 +4,21 @@
 // Li et al. 2022. Performant Almost-Latch-Free Data Structures Using Epoch Protection. https://doi.org/10.1145/3533737.3535091
 
 use crate::{
+    primitive::{
+        sync::{
+            atomic::{AtomicU32, Ordering::SeqCst},
+            Arc,
+        },
+        thread::{self, JoinHandle},
+        Backoff,
+    },
     signal_channel,
     slotted_cell::{Slot, SlottedCell},
 };
-use crossbeam_utils::{Backoff, CachePadded};
+use crossbeam_utils::CachePadded;
 use std::{
     fmt::{Display, Formatter},
     str::FromStr,
-    sync::{
-        atomic::{AtomicU32, Ordering::SeqCst},
-        Arc,
-    },
-    thread::JoinHandle,
     time::Duration,
 };
 
@@ -77,11 +80,12 @@ impl EpochFramework {
         let (stop_tx, stop_rx) = signal_channel::channel();
         let epoch_bumper = {
             let shared = shared.clone();
-            std::thread::Builder::new()
+            thread::Builder::new()
                 .name("epoch_bumper".into())
                 .spawn(move || {
                     let mut global_epoch = initial_epoch.0;
-                    for _ in stop_rx.tick(epoch_duration) {
+                    //for _ in stop_rx.tick(epoch_duration) {
+                    while !stop_rx.try_recv() {
                         for local_epoch in shared.local_epochs.iter() {
                             let backoff = Backoff::new();
                             while local_epoch.load(SeqCst) < global_epoch {

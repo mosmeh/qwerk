@@ -4,12 +4,12 @@ use crate::{
     lock::Lock,
     memory_reclamation::Reclaimer,
     persistence::LogEntry,
+    primitive::Backoff,
     record,
     small_bytes::SmallBytes,
     tid::{Tid, TidGenerator},
     Error, Index, Result, Shared,
 };
-use crossbeam_utils::Backoff;
 use scc::hash_index::Entry;
 use std::{
     cell::{Cell, UnsafeCell},

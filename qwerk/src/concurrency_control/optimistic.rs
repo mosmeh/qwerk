@@ -3,18 +3,17 @@ use crate::{
     epoch::EpochParticipant,
     memory_reclamation::Reclaimer,
     persistence::LogEntry,
+    primitive::{
+        sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::SeqCst},
+        Backoff,
+    },
     record,
     small_bytes::SmallBytes,
     tid::{Tid, TidGenerator},
     Error, Index, Result,
 };
-use crossbeam_utils::Backoff;
 use scc::hash_index::Entry;
-use std::{
-    cell::OnceCell,
-    collections::VecDeque,
-    sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::SeqCst},
-};
+use std::{cell::OnceCell, collections::VecDeque};
 
 /// Optimistic concurrency control.
 ///

@@ -1,6 +1,7 @@
 // Based on the design of thread_local crate
 // https://github.com/Amanieu/thread_local-rs/blob/faa4409fafa3a5b4898c4e5025733f760a3eb665/src/lib.rs
 
+use crate::primitive::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering::SeqCst};
 use std::{
     cell::UnsafeCell,
     convert::Infallible,
@@ -8,7 +9,6 @@ use std::{
     marker::PhantomData,
     mem::MaybeUninit,
     ops::Deref,
-    sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering::SeqCst},
 };
 
 const NUM_BUCKETS: usize = (usize::BITS - 1) as usize;
@@ -33,12 +33,15 @@ impl<T> SlottedCell<T> {
         for (i, bucket) in buckets[..num_allocated_buckets].iter_mut().enumerate() {
             *bucket = alloc_bucket::<T>(bucket_len(i));
         }
+        let buckets = buckets
+            .into_iter()
+            .map(AtomicPtr::new)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
 
         Self {
-            // SAFETY: AtomicPtr has the same representation as a pointer and
-            //         arrays have the same representation as
-            //         a sequence of their inner type.
-            buckets: unsafe { std::mem::transmute(buckets) },
+            buckets,
             unoccupied_index_lower_bound: 0.into(),
         }
     }

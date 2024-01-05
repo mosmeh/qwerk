@@ -12,6 +12,9 @@ scc = "2.0.8"
 static_assertions = "1.1.0"
 thiserror = "1.0.56"
 
+[target.'cfg(shuttle)'.dependencies]
+shuttle = "0.6.1"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.151"
 
@@ -25,6 +28,9 @@ windows-sys = { version = "0.52.0", features = [
 [dev-dependencies]
 anyhow = "1.0.79"
 clap = { version = "4.4.13", features = ["derive"] }
+itertools = "0.12.0"
+proptest = "1.4.0"
+shuttle = "0.6.1"
 tempfile = "3.9.0"
 
 [lints.clippy]
