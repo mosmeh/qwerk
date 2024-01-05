@@ -39,10 +39,6 @@ fn test<C: ConcurrencyControl>(concurrency_control: C) {
     txn.abort();
 
     let mut txn = worker.transaction();
-    txn.remove(b"alice").unwrap();
-    drop(txn); // abort
-
-    let mut txn = worker.transaction();
     assert_eq!(txn.get(b"alice").unwrap(), Some(b"foo".as_slice()));
     assert_eq!(txn.get(b"bob").unwrap(), Some(b"bar".as_slice()));
     txn.insert(b"alice", b"qux").unwrap();
@@ -56,4 +52,21 @@ fn test<C: ConcurrencyControl>(concurrency_control: C) {
     let commit_epoch2 = txn.commit().unwrap();
 
     assert!(commit_epoch1 <= commit_epoch2);
+}
+
+#[test]
+#[should_panic(expected = "Transaction dropped without being committed or aborted")]
+fn drop_without_commit_or_abort() {
+    let db = Database::open_temporary();
+    let mut worker = db.worker().unwrap();
+    let _txn = worker.transaction();
+}
+
+#[test]
+#[should_panic(expected = "foobar")]
+fn drop_with_panic() {
+    let db = Database::open_temporary();
+    let mut worker = db.worker().unwrap();
+    let _txn = worker.transaction();
+    panic!("foobar"); // Does not result in double panic.
 }

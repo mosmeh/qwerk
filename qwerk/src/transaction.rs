@@ -3,6 +3,22 @@ use crate::{
     Result, Worker,
 };
 
+/// A transaction.
+///
+/// All the operations (`get`, `insert`, `remove`, and `commit`) can fail due to
+/// conflicts with other concurrent transactions.
+/// On failure, the transaction is aborted and
+/// [`Error::TransactionNotSerializable`] is returned.
+/// You can retry the transaction (possibly after waiting for a while) when this
+/// happens.
+///
+/// All transactions have to be committed or aborted before being dropped.
+/// Otherwise the program panics.
+///
+/// Even if the transaction consists only of `get`s, the transaction
+/// still need to be committed and must succeed.
+/// The failure of the commit indicates that `get`s may have returned
+/// inconsistent values, so the values returned by `get` must be discarded.
 pub struct Transaction<'db, 'worker, C: ConcurrencyControl = DefaultProtocol> {
     worker: &'worker mut Worker<'db, C>,
     is_active: bool,
@@ -86,24 +102,19 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
 
     /// Commits the transaction.
     ///
-    /// Even if the transaction consists only of [`get`]s, the transaction
-    /// must be committed and must succeed.
-    /// If the commit fails, [`get`] may have returned inconsistent values,
-    /// so the values returned by [`get`] must be discarded.
-    ///
-    /// # Returns
-    /// An epoch at which the transaction was committed.
-    ///
-    /// [`get`]: #method.get
+    /// Returns an epoch the transaction belongs to.
     pub fn commit(mut self) -> Result<Epoch> {
         if !self.is_active {
             return Err(Error::TransactionAlreadyAborted);
         }
+        let result = self.do_commit();
+        if result.is_err() {
+            self.do_abort();
+        }
+        result
+    }
 
-        // This method takes an ownership of self, so if it returns an error
-        // while is_active is true, self is dropped and the transaction is
-        // aborted.
-
+    fn do_commit(&mut self) -> Result<Epoch> {
         let txn_executor = &mut self.worker.txn_executor;
         let commit_tid = match &self.worker.persistence {
             Some(persistence) if self.has_writes => {
@@ -141,15 +152,16 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
     /// Aborts the transaction.
     ///
     /// All the changes made in the transaction are rolled back.
-    pub fn abort(self) {
-        // Drop self.
+    pub fn abort(mut self) {
+        self.do_abort();
     }
 
     fn do_abort(&mut self) {
-        assert!(self.is_active);
-        self.worker.txn_executor.abort();
-        self.worker.txn_executor.end_transaction();
-        self.is_active = false;
+        if self.is_active {
+            self.worker.txn_executor.abort();
+            self.worker.txn_executor.end_transaction();
+            self.is_active = false;
+        }
     }
 
     /// Sets whether to wait until the transaction becomes durable when
@@ -168,12 +180,15 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
 }
 
 impl<C: ConcurrencyControl> Drop for Transaction<'_, '_, C> {
-    /// [`abort`] the transaction if not committed or aborted.
-    ///
-    /// [`abort`]: #method.abort
+    /// Panics if the transaction is not committed or aborted.
     fn drop(&mut self) {
-        if self.is_active {
-            self.do_abort();
+        if !self.is_active {
+            return;
         }
+        self.do_abort();
+        if std::thread::panicking() {
+            return;
+        }
+        panic!("Transaction dropped without being committed or aborted");
     }
 }
