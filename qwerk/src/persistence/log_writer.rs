@@ -347,7 +347,14 @@ impl LogWriter<'_> {
         self.channel.io_scope.do_foreground(|| Ok(()))?;
 
         if state.current_buf.is_none() {
-            let bytes = state.free_bufs_rx.recv().unwrap();
+            if self.channel.free_bufs.is_empty() {
+                let mut flush_state = self.channel.flush_state.lock();
+                self.channel
+                    .io_scope
+                    .do_foreground(|| self.channel.flush(&mut flush_state))?;
+                assert!(self.channel.flush_queue.is_empty());
+            }
+            let bytes = self.channel.free_bufs.pop().unwrap();
             assert!(bytes.is_empty());
             state.current_buf = Some(LogBuf::new(bytes));
         }
@@ -446,7 +453,6 @@ impl Drop for LogEntry<'_> {
 
 struct WriteState {
     current_buf: Option<LogBuf>,
-    free_bufs_rx: crossbeam_channel::Receiver<Vec<u8>>,
 }
 
 impl WriteState {
@@ -465,13 +471,13 @@ struct FlushState {
     file: Option<WriteBytesCounter<File>>,
     file_path: PathBuf,
     last_archived_epoch: Epoch,
-    free_bufs_tx: crossbeam_channel::Sender<Vec<u8>>,
 }
 
 pub struct LogChannel {
     index: usize,
     config: Arc<Config>,
     flush_queue: ArrayQueue<LogBuf>,
+    free_bufs: ArrayQueue<Vec<u8>>,
     durable_epoch: AtomicU32,
     io_scope: IoScope,
 
@@ -495,18 +501,16 @@ impl LogChannel {
         let file = File::options().append(true).create(true).open(&file_path)?;
 
         let flush_queue = ArrayQueue::new(config.buffers_per_writer.get());
+        let free_bufs = ArrayQueue::new(config.buffers_per_writer.get());
+        for _ in 0..free_bufs.capacity() {
+            free_bufs
+                .push(Vec::with_capacity(config.preallocated_buffer_size))
+                .unwrap();
+        }
 
         // The first log buffer that will be queued to the channel will have
         // an epoch >= global_epoch.
         let durable_epoch = config.epoch_fw.global_epoch().decrement();
-
-        let (free_bufs_tx, free_bufs_rx) =
-            crossbeam_channel::bounded(config.buffers_per_writer.get());
-        for _ in 0..config.buffers_per_writer.get() {
-            free_bufs_tx
-                .try_send(Vec::with_capacity(config.preallocated_buffer_size))
-                .unwrap();
-        }
 
         let io_scope = IoScope::new(config.io_monitor.clone());
 
@@ -514,17 +518,16 @@ impl LogChannel {
             index,
             config,
             flush_queue,
+            free_bufs,
             durable_epoch: durable_epoch.0.into(),
             io_scope,
             write_state: Mutex::new(WriteState {
                 current_buf: Default::default(),
-                free_bufs_rx,
             }),
             flush_state: Mutex::new(FlushState {
                 file: Some(WriteBytesCounter::new(file)),
                 file_path,
                 last_archived_epoch: Epoch(0),
-                free_bufs_tx,
             }),
         })
     }
@@ -601,7 +604,7 @@ impl LogChannel {
                     for bytes in &mut bufs_to_flush[start_buf_index..][..num_bufs_to_remove] {
                         let mut bytes = std::mem::take(bytes);
                         bytes.clear();
-                        state.free_bufs_tx.try_send(bytes).unwrap();
+                        self.free_bufs.push(bytes).unwrap();
                     }
                     if num_bufs_to_remove > 0 {
                         start_buf_index += num_bufs_to_remove;
