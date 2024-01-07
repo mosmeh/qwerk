@@ -25,6 +25,7 @@ pub struct Optimistic {
 }
 
 impl Optimistic {
+    /// Creates a new [`Optimistic`].
     pub fn new() -> Self {
         Default::default()
     }

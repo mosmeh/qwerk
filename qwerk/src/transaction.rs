@@ -16,9 +16,10 @@ use crate::{
 /// Otherwise the program panics.
 ///
 /// Even if the transaction consists only of `get`s, the transaction
-/// still need to be committed and must succeed.
+/// still needs to be committed.
 /// The failure of the commit indicates that `get`s may have returned
-/// inconsistent values, so the values returned by `get` must be discarded.
+/// inconsistent values (read skew anomaly), so the values returned by `get`s
+/// must be discarded.
 pub struct Transaction<'db, 'worker, C: ConcurrencyControl = DefaultProtocol> {
     worker: &'worker mut Worker<'db, C>,
     is_active: bool,

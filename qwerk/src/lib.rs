@@ -1,3 +1,41 @@
+#![warn(missing_docs)]
+
+//! An embedded transactional key-value store.
+//!
+//! # Features
+//!
+//! - ACID transactions with strict serializability
+//! - Optimized for multi-threaded workloads with multiple concurrent readers
+//! and writers
+//! - Persistence to the disk
+//!
+//! # Example
+//!
+//! ```
+//! use std::sync::Arc;
+//! use qwerk::{Database, Result};
+//!
+//! let db = Arc::new(Database::open_temporary());
+//!
+//! let mut worker = db.worker()?;
+//! let mut txn = worker.transaction();
+//! txn.insert(b"key", b"value")?;
+//! txn.commit()?;
+//!
+//! let db = db.clone();
+//! std::thread::spawn(move || {
+//!     let mut worker = db.worker()?;
+//!     let mut txn = worker.transaction();
+//!     assert_eq!(txn.get(b"key")?, Some(b"value".as_slice()));
+//!     txn.commit()
+//! }).join().unwrap()?;
+//!
+//! # Ok::<(), qwerk::Error>(())
+
+#[cfg(doctest)]
+#[doc = include_str!("../../README.md")]
+struct ReadMe;
+
 mod bytes_ext;
 mod concurrency_control;
 mod epoch;
@@ -28,6 +66,7 @@ use shared::Shared;
 use small_bytes::SmallBytes;
 use std::{num::NonZeroUsize, path::Path, sync::Arc, time::Duration};
 
+/// An error type.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -55,12 +94,15 @@ pub enum Error {
     #[error("Persistence failed due to I/O errors. Reopen the database after fixing the errors.")]
     PersistenceFailed,
 
+    /// I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 
+/// An alias for [`std::result::Result`] with [`Error`] as the error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Options for opening a database.
 pub struct DatabaseOptions<C: ConcurrencyControl = DefaultProtocol> {
     concurrency_control: C,
     epoch_duration: Duration,
@@ -92,6 +134,7 @@ impl<C: ConcurrencyControl> Default for DatabaseOptions<C> {
 }
 
 impl DatabaseOptions<DefaultProtocol> {
+    /// Creates a new [`DatabaseOptions`] with default values.
     pub fn new() -> Self {
         Default::default()
     }
@@ -273,6 +316,7 @@ mod record {
     }
 }
 
+/// A database.
 pub struct Database<C: ConcurrencyControl = DefaultProtocol> {
     index: Arc<Index<C::Record>>,
     concurrency_control: C,
@@ -357,6 +401,7 @@ impl<C: ConcurrencyControl> Drop for Database<C> {
     }
 }
 
+/// A thread-local worker that is used to perform transactions.
 pub struct Worker<'a, C: ConcurrencyControl + 'a = DefaultProtocol> {
     txn_executor: C::Executor<'a>,
     persistence: Option<PersistenceHandle<'a>>,
