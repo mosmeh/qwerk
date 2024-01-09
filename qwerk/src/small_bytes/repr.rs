@@ -20,28 +20,28 @@ unsafe impl Send for Repr {}
 unsafe impl Sync for Repr {}
 
 #[allow(dead_code)]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 #[repr(u8)]
 enum Tag {
     // We list all the possible tags here so that the compiler can perform
     // niche-filling optimizations.
-    Heap = 0,
-    InlineLen0 = 1,
-    InlineLen1 = 2,
-    InlineLen2 = 3,
-    InlineLen3 = 4,
-    InlineLen4 = 5,
-    InlineLen5 = 6,
-    InlineLen6 = 7,
-    InlineLen7 = 8,
-    InlineLen8 = 9,
-    InlineLen9 = 10,
-    InlineLen10 = 11,
-    InlineLen11 = 12,
-    InlineLen12 = 13,
-    InlineLen13 = 14,
-    InlineLen14 = 15,
-    InlineLen15 = 16,
+    InlineLen0 = 0,
+    InlineLen1 = 1,
+    InlineLen2 = 2,
+    InlineLen3 = 3,
+    InlineLen4 = 4,
+    InlineLen5 = 5,
+    InlineLen6 = 6,
+    InlineLen7 = 7,
+    InlineLen8 = 8,
+    InlineLen9 = 9,
+    InlineLen10 = 10,
+    InlineLen11 = 11,
+    InlineLen12 = 12,
+    InlineLen13 = 13,
+    InlineLen14 = 14,
+    InlineLen15 = 15,
+    Heap = 16,
 }
 
 impl Repr {
@@ -65,7 +65,7 @@ impl Repr {
 
     unsafe fn new_inline_unchecked(bytes: &[u8]) -> Self {
         let mut buf = [0; MAX_INLINE_LEN + 1];
-        buf[MAX_INLINE_LEN] = bytes.len() as u8 + Tag::InlineLen0 as u8;
+        buf[MAX_INLINE_LEN] = bytes.len() as u8;
         buf[..bytes.len()].copy_from_slice(bytes);
         std::mem::transmute(buf)
     }
@@ -84,10 +84,10 @@ impl Repr {
     }
 
     pub const fn as_slice(&self) -> &[u8] {
-        let (ptr, len) = if let Some(len) = (self.tag() as u8).checked_sub(Tag::InlineLen0 as u8) {
-            ((self as *const Self).cast::<u8>(), len as usize)
-        } else {
+        let (ptr, len) = if matches!(self.tag(), Tag::Heap) {
             (self.heap_ptr().cast_const(), self.heap_len())
+        } else {
+            ((self as *const Self).cast(), self.tag() as usize)
         };
         unsafe { std::slice::from_raw_parts(ptr, len) }
     }
@@ -107,7 +107,7 @@ impl Repr {
 
 impl Drop for Repr {
     fn drop(&mut self) {
-        if self.tag() == Tag::Heap {
+        if matches!(self.tag(), Tag::Heap) {
             let ptr = self.heap_ptr();
             let len = self.heap_len();
             let _ = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(ptr, len)) };
