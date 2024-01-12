@@ -171,7 +171,7 @@ fn run_benchmark<C: ConcurrencyControl>(cli: Cli, concurrency_control: C) -> any
 
     eprintln!("Preparing");
     shared.barrier.wait();
-    shared.db.flush()?;
+    shared.db.commit_pending()?;
 
     eprintln!("Start");
     shared.barrier.wait();
@@ -240,7 +240,7 @@ fn run_worker<C: ConcurrencyControl>(
         let key = i.to_ne_bytes();
         let mut txn = worker.transaction();
         txn.insert(key, &payload).unwrap();
-        txn.set_wait_for_durability(false);
+        txn.set_async_commit(true);
         txn.commit().unwrap();
     }
 
@@ -311,7 +311,7 @@ fn run_transaction<C: ConcurrencyControl>(
             }
         }
     }
-    txn.set_wait_for_durability(false);
+    txn.set_async_commit(true);
     txn.commit()?;
     Ok(())
 }

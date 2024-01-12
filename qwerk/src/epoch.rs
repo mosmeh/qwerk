@@ -8,6 +8,7 @@ use crate::{
     slotted_cell::{Slot, SlottedCell},
 };
 use crossbeam_utils::{Backoff, CachePadded};
+use parking_lot::{Condvar, Mutex};
 use std::{
     fmt::{Display, Formatter},
     str::FromStr,
@@ -25,7 +26,7 @@ const RECLAMATION_EPOCH_OFFSET: u32 = 2;
 
 const RELEASED_MARKER: u32 = u32::MAX;
 
-/// A unit of time for concurrency control and durability.
+/// A period of time for concurrency control and durability.
 ///
 /// Epochs are represented as integers that are non-decreasing over time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -73,6 +74,8 @@ impl EpochFramework {
         let shared = Arc::new(SharedState {
             global_epoch: initial_epoch.0.into(),
             local_epochs: Default::default(),
+            global_epoch_update_condvar: Default::default(),
+            mutex_for_condvar: Default::default(),
         });
         let (stop_tx, stop_rx) = signal_channel::channel();
         let epoch_bumper = {
@@ -89,6 +92,7 @@ impl EpochFramework {
                             }
                         }
                         global_epoch = shared.global_epoch.fetch_add(1, SeqCst) + 1;
+                        shared.global_epoch_update_condvar.notify_all();
                     }
                 })
                 .unwrap()
@@ -106,13 +110,9 @@ impl EpochFramework {
         self.epoch_duration
     }
 
-    pub fn global_epoch(&self) -> Epoch {
-        Epoch(self.shared.global_epoch.load(SeqCst))
-    }
-
     pub fn participant(&self) -> EpochParticipant {
         EpochParticipant {
-            global_epoch: &self.shared.global_epoch,
+            shared: &self.shared,
             local_epoch: self
                 .shared
                 .local_epochs
@@ -120,16 +120,32 @@ impl EpochFramework {
         }
     }
 
+    pub fn global_epoch(&self) -> Epoch {
+        self.shared.global_epoch()
+    }
+
     /// Waits until the global epoch is incremented.
     ///
     /// Returns the new global epoch.
     pub fn sync(&self) -> Epoch {
-        let new_global_epoch = self.shared.global_epoch.load(SeqCst) + 1;
-        let backoff = Backoff::new();
-        while self.shared.global_epoch.load(SeqCst) < new_global_epoch {
-            backoff.snooze();
-        }
-        Epoch(new_global_epoch)
+        let new = self.shared.global_epoch().increment();
+        self.shared.wait_for_global_epoch(new);
+        new
+    }
+
+    /// Returns the reclamation epoch.
+    ///
+    /// The reclamation epoch is the largest epoch that no participant of the
+    /// epoch framework is currently in.
+    pub fn reclamation_epoch(&self) -> Epoch {
+        self.shared.reclamation_epoch()
+    }
+
+    /// Waits until the given epoch is equal to or greater than the reclamation
+    /// epoch.
+    pub fn wait_for_reclamation(&self, epoch: Epoch) {
+        self.shared
+            .wait_for_global_epoch(Epoch(epoch.0 + RECLAMATION_EPOCH_OFFSET));
     }
 }
 
@@ -143,10 +159,31 @@ impl Drop for EpochFramework {
 struct SharedState {
     global_epoch: AtomicU32,
     local_epochs: SlottedCell<CachePadded<AtomicU32>>,
+    global_epoch_update_condvar: Condvar,
+    mutex_for_condvar: Mutex<()>,
+}
+
+impl SharedState {
+    fn global_epoch(&self) -> Epoch {
+        Epoch(self.global_epoch.load(SeqCst))
+    }
+
+    fn reclamation_epoch(&self) -> Epoch {
+        Epoch(self.global_epoch.load(SeqCst) - RECLAMATION_EPOCH_OFFSET)
+    }
+
+    fn wait_for_global_epoch(&self, epoch: Epoch) {
+        if self.global_epoch.load(SeqCst) >= epoch.0 {
+            return;
+        }
+        let mut guard = self.mutex_for_condvar.lock();
+        self.global_epoch_update_condvar
+            .wait_while(&mut guard, |()| self.global_epoch.load(SeqCst) < epoch.0);
+    }
 }
 
 pub struct EpochParticipant<'a> {
-    global_epoch: &'a AtomicU32,
+    shared: &'a SharedState,
     local_epoch: Slot<'a, CachePadded<AtomicU32>>,
 }
 
@@ -189,17 +226,9 @@ impl<'a> EpochParticipant<'a> {
     /// Returns the current global epoch and whether this participant
     /// newly acquired the epoch protection due to this call.
     fn refresh(&self) -> (Epoch, bool) {
-        let epoch = self.global_epoch.load(SeqCst);
+        let epoch = self.shared.global_epoch.load(SeqCst);
         let prev = self.local_epoch.swap(epoch, SeqCst);
         (Epoch(epoch), prev == RELEASED_MARKER)
-    }
-
-    /// Returns the reclamation epoch.
-    ///
-    /// The reclamation epoch is the largest epoch that no participant of the
-    /// epoch framework is currently in.
-    pub fn reclamation_epoch(&self) -> Epoch {
-        Epoch(self.global_epoch.load(SeqCst) - RECLAMATION_EPOCH_OFFSET)
     }
 }
 

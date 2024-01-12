@@ -1,6 +1,6 @@
 use super::{ConcurrencyControl, ConcurrencyControlInternal, Shared, TransactionExecutor};
 use crate::{
-    epoch::EpochParticipant,
+    epoch::{EpochFramework, EpochParticipant},
     memory_reclamation::Reclaimer,
     persistence::LogEntry,
     record,
@@ -76,12 +76,13 @@ impl ConcurrencyControlInternal for Optimistic {
     fn executor<'a>(
         &'a self,
         index: &'a Index<Self::Record>,
-        epoch_participant: EpochParticipant<'a>,
+        epoch_fw: &'a EpochFramework,
         reclaimer: Reclaimer<'a, Self::Record>,
     ) -> Self::Executor<'a> {
         Self::Executor {
             index,
-            epoch_participant,
+            epoch_fw,
+            epoch_participant: epoch_fw.participant(),
             reclaimer,
             tid_generator: Default::default(),
             removal_queue: Default::default(),
@@ -205,6 +206,7 @@ struct RecordSnapshot<'a> {
 pub struct Executor<'a> {
     // Global state
     index: &'a Index<Record>,
+    epoch_fw: &'a EpochFramework,
 
     // Per-executor state
     epoch_participant: EpochParticipant<'a>,
@@ -437,7 +439,7 @@ impl TransactionExecutor for Executor<'_> {
 
 impl Executor<'_> {
     fn process_removal_queue(&mut self) {
-        let reclamation_epoch = self.epoch_participant.reclamation_epoch();
+        let reclamation_epoch = self.epoch_fw.reclamation_epoch();
         while let Some((_, tid)) = self.removal_queue.front() {
             if tid.epoch() > reclamation_epoch {
                 break;
@@ -466,13 +468,11 @@ impl Executor<'_> {
 
 impl Drop for Executor<'_> {
     fn drop(&mut self) {
-        let backoff = Backoff::new();
-        loop {
+        if let Some((_, tid)) = self.removal_queue.back() {
+            // The back of the queue has the highest epoch.
+            self.epoch_fw.wait_for_reclamation(tid.epoch());
             self.process_removal_queue();
-            if self.removal_queue.is_empty() {
-                break;
-            }
-            backoff.snooze();
+            assert!(self.removal_queue.is_empty());
         }
     }
 }

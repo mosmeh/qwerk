@@ -24,7 +24,7 @@ pub struct Transaction<'db, 'worker, C: ConcurrencyControl = DefaultProtocol> {
     worker: &'worker mut Worker<'db, C>,
     is_active: bool,
     has_writes: bool,
-    wait_for_durability: bool,
+    async_commit: bool,
 }
 
 impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
@@ -33,7 +33,7 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
             worker,
             is_active: true,
             has_writes: false,
-            wait_for_durability: true,
+            async_commit: false,
         }
     }
 
@@ -126,7 +126,7 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
                 txn_executor.precommit(commit_tid);
                 txn_executor.end_transaction();
                 self.is_active = false;
-                if self.wait_for_durability {
+                if !self.async_commit {
                     log_entry.flush()?;
                 }
                 commit_tid
@@ -141,12 +141,16 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
         };
 
         let commit_epoch = commit_tid.epoch();
-        match &self.worker.persistence {
-            Some(persistence) if self.wait_for_durability => {
+        if !self.async_commit {
+            if let Some(persistence) = &self.worker.persistence {
                 persistence.wait_for_durability(commit_epoch);
             }
-            _ => {}
+
+            // Ensure recoverability of the transaction by delaying the commit
+            // completion until the commit epoch finishes.
+            self.worker.epoch_fw.wait_for_reclamation(commit_epoch);
         }
+
         Ok(commit_epoch)
     }
 
@@ -165,18 +169,21 @@ impl<'db, 'worker, C: ConcurrencyControl> Transaction<'db, 'worker, C> {
         }
     }
 
-    /// Sets whether to wait until the transaction becomes durable when
-    /// committing the transaction.
-    /// Defaults to `true`.
+    /// Sets whether the transaction should be committed asynchronously.
+    /// Defaults to `false`.
     ///
-    /// Setting this to `false` is useful when multiple transactions are
-    /// committed in a batch. To make sure that the transactions are durable in
-    /// this case, perform a normal commit on the last transaction in the batch
-    /// or call [`Database::flush`].
+    /// If this is set to `true`, [`commit`] does not wait for the transaction
+    /// to be committed.
     ///
-    /// [`Database::flush`]: crate::Database#method.flush
-    pub fn set_wait_for_durability(&mut self, yes: bool) {
-        self.wait_for_durability = yes;
+    /// Setting this to `true` is useful when multiple transactions are
+    /// submitted in a batch. To make sure that the transactions are committed,
+    /// perform a normal [`commit`] on the last transaction in the batch or
+    /// call [`Database::commit_pending`].
+    ///
+    /// [`commit`]: #method.commit
+    /// [`Database::commit_pending`]: crate::Database#method.commit_pending
+    pub fn set_async_commit(&mut self, yes: bool) {
+        self.async_commit = yes;
     }
 }
 

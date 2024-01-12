@@ -48,7 +48,7 @@ fn main() -> Result<()> {
             txn.remove(&key)?;
             txn.commit()?;
         }
-        Command::Epoch => println!("{}", db.durable_epoch()),
+        Command::Epoch => println!("{}", db.committed_epoch()),
     }
     Ok(())
 }

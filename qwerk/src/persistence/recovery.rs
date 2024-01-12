@@ -136,7 +136,7 @@ pub fn recover<C: ConcurrencyControl>(
     // If there are archive log files, create a new checkpoint to compact
     // the log files. If there are only "current" log files, we resume appending
     // to them for faster recovery.
-    if has_archive_log_files {
+    let index = if has_archive_log_files {
         let index = non_fuzzy_checkpoint(dir, index, new_epoch, max_file_size)?;
 
         // Remove old checkpoint files, log files, and unfinished temporary files.
@@ -148,7 +148,7 @@ pub fn recover<C: ConcurrencyControl>(
             FileId::Log(_) | FileId::Temporary => true,
         })?;
 
-        Ok((index, new_epoch.increment()))
+        index
     } else {
         remove_files(dir, |id| match id {
             FileId::Checkpoint(id) => {
@@ -163,8 +163,10 @@ pub fn recover<C: ConcurrencyControl>(
             }
             FileId::Temporary => true,
         })?;
-        Ok((index, new_epoch))
-    }
+        index
+    };
+
+    Ok((index, new_epoch.increment()))
 }
 
 fn load_files<T, F>(files: ArrayQueue<T>, num_threads: NonZeroUsize, load: F) -> Result<()>

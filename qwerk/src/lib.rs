@@ -158,14 +158,16 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
             FileLock::try_lock_exclusive(dir.join("lock"))?.ok_or(Error::DatabaseAlreadyOpen)?;
 
         let persistent_epoch = Arc::new(PersistentEpoch::new(&dir)?);
+        let durable_epoch = persistent_epoch.get();
+
         let (index, initial_epoch) = persistence::recover::<C>(
             &dir,
             &persistent_epoch,
             self.recovery_threads,
             self.max_file_size,
         )?;
-        let epoch_fw = Arc::new(EpochFramework::new(initial_epoch, self.epoch_duration));
         let index = Arc::new(index);
+        let epoch_fw = Arc::new(EpochFramework::new(initial_epoch, self.epoch_duration));
         let reclamation = Arc::new(MemoryReclamation::new(self.gc_threshold));
         let io_monitor = Arc::new(IoMonitor::default());
 
@@ -194,13 +196,18 @@ impl<C: ConcurrencyControl> DatabaseOptions<C> {
             },
         )?;
 
-        Ok(Database {
+        let db = Database {
             index,
             concurrency_control: self.concurrency_control,
             epoch_fw,
             reclamation,
             persistence: Some(persistence),
-        })
+        };
+        assert!(
+            db.committed_epoch() >= durable_epoch,
+            "All durable transactions must be committed after recovery"
+        );
+        Ok(db)
     }
 
     /// Opens a temporary database that is not persisted to the disk.
@@ -348,14 +355,12 @@ impl<C: ConcurrencyControl> Database<C> {
     /// You usually should spawn one [`Worker`] per thread, and reuse the
     /// [`Worker`] for multiple transactions.
     pub fn worker(&self) -> Result<Worker<C>> {
-        let epoch_participant = self.epoch_fw.participant();
         let reclaimer = self.reclamation.reclaimer();
         Ok(Worker {
-            txn_executor: self.concurrency_control.executor(
-                &self.index,
-                epoch_participant,
-                reclaimer,
-            ),
+            txn_executor: self
+                .concurrency_control
+                .executor(&self.index, &self.epoch_fw, reclaimer),
+            epoch_fw: &self.epoch_fw,
             persistence: self
                 .persistence
                 .as_ref()
@@ -364,29 +369,30 @@ impl<C: ConcurrencyControl> Database<C> {
         })
     }
 
-    /// Returns the current durable epoch.
-    ///
-    /// The durable epoch is the epoch up to which all changes made by
-    /// committed transactions are guaranteed to be durable.
-    ///
-    /// Always returns `Epoch(0)` if the database is temporary.
-    pub fn durable_epoch(&self) -> Epoch {
-        self.persistence
+    /// Returns the maximum epoch that is guaranteed to be committed.
+    pub fn committed_epoch(&self) -> Epoch {
+        let durable_epoch = self
+            .persistence
             .as_ref()
-            .map_or(Epoch(0), Persistence::durable_epoch)
+            .map_or(Epoch(u32::MAX), Persistence::durable_epoch);
+        durable_epoch.min(self.epoch_fw.reclamation_epoch())
     }
 
-    /// Makes sure the changes made by all committed transactions are persisted
-    /// to the disk.
+    /// Commits all the asynchronous commits that have not been completed yet.
     ///
-    /// This operation is a no-op if the database is temporary.
+    /// After this method returns, all the transactions that had requested
+    /// commits before this method was called are guaranteed to be committed.
+    /// There is no guarantee about the transactions that request commits
+    /// concurrently with this method.
     ///
-    /// Returns the durable epoch after the flush.
-    pub fn flush(&self) -> Result<Epoch> {
-        Ok(match &self.persistence {
-            Some(p) => p.flush()?,
-            None => Epoch(0),
-        })
+    /// Returns the maximum epoch that is guaranteed to be committed.
+    pub fn commit_pending(&self) -> Result<Epoch> {
+        let epoch = self.epoch_fw.global_epoch();
+        if let Some(persistence) = &self.persistence {
+            persistence.flush()?;
+        }
+        self.epoch_fw.wait_for_reclamation(epoch);
+        Ok(epoch)
     }
 }
 
@@ -404,6 +410,7 @@ impl<C: ConcurrencyControl> Drop for Database<C> {
 /// A thread-local worker that is used to perform transactions.
 pub struct Worker<'a, C: ConcurrencyControl + 'a = DefaultProtocol> {
     txn_executor: C::Executor<'a>,
+    epoch_fw: &'a EpochFramework,
     persistence: Option<PersistenceHandle<'a>>,
 }
 

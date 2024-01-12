@@ -52,6 +52,10 @@ fn test<C: ConcurrencyControl>(concurrency_control: C) {
     let commit_epoch2 = txn.commit().unwrap();
 
     assert!(commit_epoch1 <= commit_epoch2);
+
+    let committed_epoch = db.commit_pending().unwrap();
+    assert!(committed_epoch >= commit_epoch2);
+    assert!(db.committed_epoch() >= committed_epoch);
 }
 
 #[test]
