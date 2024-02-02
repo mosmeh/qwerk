@@ -8,12 +8,12 @@ crossbeam-channel = "0.5.11"
 crossbeam-queue = "0.3.11"
 crossbeam-utils = "0.8.19"
 parking_lot = "0.12.1"
-scc = "2.0.9"
+scc = "2.0.16"
 static_assertions = "1.1.0"
 thiserror = "1.0.56"
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2.152"
+libc = "0.2.153"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52.0", features = [
@@ -24,7 +24,7 @@ windows-sys = { version = "0.52.0", features = [
 
 [dev-dependencies]
 anyhow = "1.0.79"
-clap = { version = "4.4.16", features = ["derive"] }
+clap = { version = "4.4.18", features = ["derive"] }
 tempfile = "3.9.0"
 
 [lints.clippy]
