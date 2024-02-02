@@ -42,9 +42,9 @@ impl CheckpointReader {
             }
 
             // We should have reached EOF.
-            return match self.file.read(&mut [0; 1]) {
-                Ok(0) => Ok(None),
-                Ok(_) => Err(Error::DatabaseCorrupted),
+            return match self.file.read_exact(&mut [0; 1]) {
+                Ok(()) => Err(Error::DatabaseCorrupted),
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
                 Err(e) => Err(e.into()),
             };
         }

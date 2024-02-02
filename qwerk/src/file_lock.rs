@@ -22,6 +22,7 @@ impl FileLock {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path.as_ref())?;
         Ok(sys::try_lock_exclusive(&file)?.then_some(Self { _file: file }))
     }

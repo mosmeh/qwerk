@@ -61,9 +61,9 @@ impl Iterator for LogReader {
             Ordering::Less => Some(self.read_entry().map_err(Into::into)),
             Ordering::Equal => {
                 // Make sure we have reached EOF.
-                match self.file.read(&mut [0; 1]) {
-                    Ok(0) => None,
-                    Ok(_) => Some(Err(Error::DatabaseCorrupted)),
+                match self.file.read_exact(&mut [0; 1]) {
+                    Ok(()) => Some(Err(Error::DatabaseCorrupted)),
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => None,
                     Err(e) => Some(Err(e.into())),
                 }
             }
